@@ -36,7 +36,6 @@ _STORAGE_CATEGORY = "storage_failed"
 _STORAGE_MESSAGE = "Local analysis storage failed safely."
 _ID_CATEGORY = "analysis_id_collision"
 _ID_MESSAGE = "A unique analysis ID could not be allocated safely."
-_STAGES = {"facts", "signals"}
 _T = TypeVar("_T")
 
 
@@ -115,14 +114,21 @@ class _PersistedRecordSafety:
             signal.model_copy(
                 update={
                     "evidence": [
-                        self._provider_ref(value) for value in signal.evidence
+                        ref
+                        for value in signal.evidence
+                        if (ref := self._signal_ref(value)) is not None
                     ]
                 }
             )
             for signal in sorted(signals, key=lambda item: item.question_id)
         ]
 
-    def validate(self, record: AnalysisRecord) -> AnalysisRecord:
+    def validate(
+        self,
+        record: AnalysisRecord,
+        *,
+        require_current_inputs: bool = True,
+    ) -> AnalysisRecord:
         if record.input_hash != self.input_hash:
             raise ValueError("input hash changed")
         if self.raw_job is not None and _contains_exact(
@@ -135,20 +141,80 @@ class _PersistedRecordSafety:
             return record
         if record.result is None or record.trace is None:
             raise ValueError("success is incomplete")
-        self._complete(record.facts, record.signals)
+        if require_current_inputs:
+            self._complete(record.facts, record.signals)
         self._versions(record)
         self._evidence(record)
         expected_inputs = {
             self.profile.id,
             *(claim.id for claim in self.profile.claims if claim.confirmed),
-            *(item.id for item in self.rubric.facts),
-            *(item.id for item in self.rubric.questions),
+            *(item.fact_id for item in record.facts),
+            *(item.question_id for item in record.signals),
         }
         if set(record.trace.input_ids) != expected_inputs:
             raise ValueError("trace input refs incomplete")
         if record.trace.outbound_data_classes != [DataClass.PUBLIC_JOB_DATA]:
             raise ValueError("unsafe outbound data class")
         return record
+
+    def validate_stored(self, record: AnalysisRecord) -> None:
+        trace = record.trace
+        result = record.result
+        if record.status != "success" or trace is None or result is None:
+            raise ValueError("stored analysis is not successful")
+        fact_ids = [item.fact_id for item in record.facts]
+        signal_keys = [
+            (item.question_id, item.question_version) for item in record.signals
+        ]
+        if len(fact_ids) != len(set(fact_ids)):
+            raise ValueError("stored facts are duplicated")
+        if len(signal_keys) != len(set(signal_keys)):
+            raise ValueError("stored signals are duplicated")
+        if trace.analysis_id != record.id:
+            raise ValueError("stored trace identity mismatch")
+        stored_input_ids = set(fact_ids + [item[0] for item in signal_keys])
+        traced_input_ids = {
+            item
+            for item in trace.input_ids
+            if not item.startswith("profile-ref:v1:")
+        }
+        if traced_input_ids != stored_input_ids:
+            raise ValueError("stored trace inputs are incomplete")
+        expected_stages = {
+            *({"facts"} if record.facts else set()),
+            *({"signals"} if record.signals else set()),
+        }
+        for versions in (
+            trace.providers,
+            trace.model_versions,
+            trace.prompt_versions,
+        ):
+            if set(versions) != expected_stages or any(
+                not item for item in versions.values()
+            ):
+                raise ValueError("stored stage metadata is incomplete")
+        if result.model_versions != trace.model_versions:
+            raise ValueError("stored model versions mismatch")
+        if trace.result_version != result.result_version:
+            raise ValueError("stored result version mismatch")
+        if result.rubric_version != trace.rubric_version:
+            raise ValueError("stored rubric versions mismatch")
+        if record.facts and (
+            {item.provider for item in record.facts} != {trace.providers["facts"]}
+            or {item.model for item in record.facts}
+            != {trace.model_versions["facts"]}
+        ):
+            raise ValueError("stored fact metadata mismatch")
+        if record.signals and (
+            {item.provider for item in record.signals}
+            != {trace.providers["signals"]}
+            or {item.model for item in record.signals}
+            != {trace.model_versions["signals"]}
+        ):
+            raise ValueError("stored signal metadata mismatch")
+        self._evidence(record)
+        if trace.outbound_data_classes != [DataClass.PUBLIC_JOB_DATA]:
+            raise ValueError("stored trace has unsafe outbound data")
 
     def _complete(
         self,
@@ -162,8 +228,7 @@ class _PersistedRecordSafety:
         expected_facts = {item.id for item in self.rubric.facts}
         actual_facts = [item.fact_id for item in facts]
         if (
-            not expected_facts
-            or len(actual_facts) != len(set(actual_facts))
+            len(actual_facts) != len(set(actual_facts))
             or set(actual_facts) != expected_facts
         ):
             raise ValueError("fact set incomplete")
@@ -176,8 +241,7 @@ class _PersistedRecordSafety:
             (item.question_id, item.question_version) for item in signals
         ]
         if (
-            not expected_signals
-            or len(actual_signals) != len(set(actual_signals))
+            len(actual_signals) != len(set(actual_signals))
             or set(actual_signals) != expected_signals
         ):
             raise ValueError("signal set incomplete")
@@ -187,12 +251,18 @@ class _PersistedRecordSafety:
         result = record.result
         if trace is None or result is None:
             raise ValueError("versions missing")
+        expected_stages = {
+            *({"facts"} if record.facts else set()),
+            *({"signals"} if record.signals else set()),
+        }
         for versions in (
             trace.providers,
             trace.model_versions,
             trace.prompt_versions,
         ):
-            if set(versions) != _STAGES or any(not item for item in versions.values()):
+            if set(versions) != expected_stages or any(
+                not item for item in versions.values()
+            ):
                 raise ValueError("stage metadata incomplete")
         questions = {item.id: item.version for item in self.rubric.questions}
         if trace.question_versions != questions:
@@ -235,13 +305,13 @@ class _PersistedRecordSafety:
             ),
             *(item for gap in result.gaps for item in gap.candidate_evidence),
         ]
-        if any(not self._job_or_provider_ref(item) for item in job_refs):
+        if any(not self._job_ref(item) for item in job_refs):
             raise ValueError("raw job evidence")
         if any(not item.startswith("profile-ref:v1:") for item in profile_refs):
             raise ValueError("raw profile evidence")
         if any(
             not (
-                self._job_or_provider_ref(item)
+                self._job_ref(item)
                 or item.startswith("profile-ref:v1:")
             )
             for item in trace.evidence
@@ -253,31 +323,26 @@ class _PersistedRecordSafety:
             f"jd-evidence:v1:{self.job_digest}:{start}:{end}:{_digest(value)}"
         )
 
-    def _provider_ref(self, value: str) -> str:
+    def _signal_ref(self, value: str) -> str | None:
+        """Keep only evidence resolvable against a user-resupplied JD."""
         if self.raw_job is None:
             raise ValueError("raw job required")
         start = self.raw_job.find(value)
         if value and start >= 0:
             return self._jd_ref(start, start + len(value), value)
-        return (
-            f"provider-evidence:v1:{self.job_digest}:na:na:{_digest(value)}"
-        )
+        return None
 
-    def _job_or_provider_ref(self, value: str) -> bool:
-        return value.startswith(
-            (
-                f"jd-evidence:v1:{self.job_digest}:",
-                f"provider-evidence:v1:{self.job_digest}:",
-            )
-        )
+    def _job_ref(self, value: str) -> bool:
+        return value.startswith(f"jd-evidence:v1:{self.job_digest}:")
 
 
 class JobAnalysisService:
     """Orchestrate providers and persist only safety-projected records.
 
     New analyses and failed recompute attempts are append-only. Successful
-    recompute updates its original stable ID. Pipeline and storage errors expose
-    only fixed safe messages.
+    recompute updates its original stable ID without allocating an attempt ID.
+    Unconfigured provider stages are skipped, and non-JD model rationale is
+    discarded. Pipeline and storage errors expose only fixed safe messages.
     """
 
     def __init__(
@@ -313,12 +378,16 @@ class JobAnalysisService:
         started_at = self._monotonic_clock()
         failed = False
         try:
-            raw_facts = self._fact_extractor.extract(job_description, rubric)
-            facts = safety.project_facts(raw_facts)
-            raw_signals = self._signal_provider.judge(
-                job_description, rubric.questions
-            )
-            signals = safety.project_signals(raw_signals)
+            facts = []
+            if rubric.facts:
+                raw_facts = self._fact_extractor.extract(job_description, rubric)
+                facts = safety.project_facts(raw_facts)
+            signals = []
+            if rubric.questions:
+                raw_signals = self._signal_provider.judge(
+                    job_description, rubric.questions
+                )
+                signals = safety.project_signals(raw_signals)
             metadata = self._metadata(facts, signals)
             result = _decision(
                 facts,
@@ -385,7 +454,6 @@ class JobAnalysisService:
                 "Analysis cannot be recomputed; choose a successful analysis ID.",
             )
         profile, rubric = self._active_inputs()
-        attempt_id = self._allocate_id()
         safety = _PersistedRecordSafety(
             existing.input_hash, rubric, profile, None
         )
@@ -397,6 +465,7 @@ class JobAnalysisService:
         }
         failed = False
         try:
+            safety.validate_stored(existing)
             result = _decision(
                 existing.facts,
                 existing.signals,
@@ -425,19 +494,22 @@ class JobAnalysisService:
                         "error_category": None,
                         "error": None,
                     }
-                )
+                ),
+                require_current_inputs=False,
             )
         except Exception:
             failed = True
         if failed:
-            self._try_failure(
-                safety,
-                attempt_id,
-                existing.input_hash,
-                self._utc_clock(),
-                started_at,
-                source_analysis_id=existing.id,
-            )
+            attempt_id = self._failure_attempt_id()
+            if attempt_id is not None:
+                self._try_failure(
+                    safety,
+                    attempt_id,
+                    existing.input_hash,
+                    self._utc_clock(),
+                    started_at,
+                    source_analysis_id=existing.id,
+                )
             raise AnalysisServiceError(
                 _FAILURE_CATEGORY, _FAILURE_MESSAGE
             ) from None
@@ -507,31 +579,27 @@ class JobAnalysisService:
         facts: list[ExtractedFact],
         signals: list[DecisionSignal],
     ) -> dict[str, dict[str, str]]:
-        return {
-            "providers": {
-                "facts": _stage_metadata(
-                    self._fact_extractor, facts, "provider", "fact extractor"
-                ),
-                "signals": _stage_metadata(
-                    self._signal_provider,
-                    signals,
-                    "provider",
-                    "signal provider",
-                ),
-            },
-            "models": {
-                "facts": _stage_metadata(
-                    self._fact_extractor, facts, "model", "fact model"
-                ),
-                "signals": _stage_metadata(
-                    self._signal_provider, signals, "model", "signal model"
-                ),
-            },
-            "prompts": {
-                "facts": _prompt_version(self._fact_extractor),
-                "signals": _prompt_version(self._signal_provider),
-            },
-        }
+        metadata = {"providers": {}, "models": {}, "prompts": {}}
+        for stage, provider, outputs, label in (
+            ("facts", self._fact_extractor, facts, "fact"),
+            ("signals", self._signal_provider, signals, "signal"),
+        ):
+            if not outputs:
+                continue
+            metadata["providers"][stage] = _stage_metadata(
+                provider, outputs, "provider", f"{label} provider"
+            )
+            metadata["models"][stage] = _stage_metadata(
+                provider, outputs, "model", f"{label} model"
+            )
+            metadata["prompts"][stage] = _prompt_version(provider)
+        return metadata
+
+    def _failure_attempt_id(self) -> str | None:
+        try:
+            return self._allocate_id()
+        except AnalysisServiceError:
+            return None
 
     def _find_analysis(self, analysis_id: str) -> AnalysisRecord | None:
         records = self._store_call(self._store.list_analyses)

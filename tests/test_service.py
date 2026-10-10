@@ -219,6 +219,84 @@ def test_recompute_reuses_normalized_inputs_without_model_calls(tmp_path) -> Non
     assert store.list_analyses() == [recomputed]
 
 
+def test_recompute_uses_current_rubric_missing_and_stale_semantics(tmp_path) -> None:
+    ids = iter(["analysis-1", "unused-attempt"])
+    service, store, extractor, signal_provider = _service(
+        tmp_path,
+        profile=CandidateProfile(),
+        rubric=_rubric(),
+        id_factory=lambda: next(ids),
+    )
+    original = service.analyze_job(JOB_DESCRIPTION)
+    current = _rubric(version="rubric-v2").model_copy(
+        update={
+            "dimensions": [
+                _rubric().dimensions[0].model_copy(
+                    update={"signal_ids": ["role_fit", "new_signal"]}
+                )
+            ],
+            "questions": [
+                DecisionQuestion(
+                    id="role_fit",
+                    version="question-v2",
+                    question="Does this current role fit?",
+                ),
+                DecisionQuestion(
+                    id="new_signal",
+                    version="question-v1",
+                    question="Is this newly configured signal favorable?",
+                ),
+            ]
+        }
+    )
+    store.save_rubric(current)
+
+    recomputed = service.recompute_decision(original.id)
+
+    assert recomputed.status == "success"
+    assert recomputed.signals == original.signals
+    assert recomputed.result is not None
+    assert recomputed.result.needs_review is True
+    assert {gap.subject_id for gap in recomputed.result.gaps} == {
+        "role_fit",
+        "new_signal",
+    }
+    assert recomputed.trace is not None
+    assert recomputed.trace.question_versions == {
+        "role_fit": "question-v2",
+        "new_signal": "question-v1",
+    }
+    assert len(extractor.calls) == 1
+    assert len(signal_provider.calls) == 1
+
+
+def test_recompute_rejects_stored_input_trace_integrity_mismatch(tmp_path) -> None:
+    ids = iter(["analysis-1", "failure-attempt-1"])
+    service, store, _, _ = _service(
+        tmp_path,
+        profile=CandidateProfile(),
+        rubric=_rubric(),
+        id_factory=lambda: next(ids),
+    )
+    original = service.analyze_job(JOB_DESCRIPTION)
+    tampered = original.model_copy(
+        update={
+            "trace": original.trace.model_copy(
+                update={"input_ids": [*original.trace.input_ids, "unbound-input"]}
+            )
+        }
+    )
+    store.save_analysis(tampered)
+
+    with pytest.raises(AnalysisServiceError, match="Job analysis failed safely."):
+        service.recompute_decision(original.id)
+
+    records = store.list_analyses()
+    assert records[0] == tampered
+    assert records[1].source_analysis_id == original.id
+    assert records[1].status == "failed"
+
+
 def test_missing_profile_returns_actionable_error(tmp_path) -> None:
     service, store, extractor, signal_provider = _service(
         tmp_path,
@@ -457,19 +535,26 @@ def test_duplicate_generated_id_fails_before_providers_without_overwrite(
     assert len(signal_provider.calls) == 1
 
 
-def test_recompute_failure_id_collision_leaves_success_untouched(tmp_path) -> None:
+def test_successful_recompute_does_not_allocate_unused_failure_id(tmp_path) -> None:
+    generated_ids = []
+
+    def same_id() -> str:
+        generated_ids.append("analysis-1")
+        return "analysis-1"
+
     service, store, _, _ = _service(
         tmp_path,
         profile=CandidateProfile(),
         rubric=_rubric(),
+        id_factory=same_id,
     )
     original = service.analyze_job(JOB_DESCRIPTION)
 
-    with pytest.raises(AnalysisServiceError) as exc_info:
-        service.recompute_decision(original.id)
+    recomputed = service.recompute_decision(original.id)
 
-    assert exc_info.value.code == "analysis_id_collision"
-    assert store.list_analyses() == [original]
+    assert recomputed.id == original.id
+    assert generated_ids == ["analysis-1"]
+    assert store.list_analyses() == [recomputed]
 
 
 @pytest.mark.parametrize("provider_fails", [False, True])
@@ -599,6 +684,77 @@ def test_both_provider_stages_require_prompt_metadata(tmp_path) -> None:
         service.analyze_job(JOB_DESCRIPTION)
 
     assert [record.status for record in store.list_analyses()] == ["failed"]
+
+
+@pytest.mark.parametrize(
+    "rubric",
+    [
+        Rubric(
+            version="empty-v1",
+            recommendation_thresholds={
+                RecommendationLevel.PRIORITY_APPLY: 0.8,
+                RecommendationLevel.APPLY_AFTER_REVIEW: 0.6,
+                RecommendationLevel.HOLD: 0.4,
+                RecommendationLevel.SKIP: 0,
+            },
+        ),
+        _rubric().model_copy(update={"dimensions": [], "questions": []}),
+        _rubric().model_copy(update={"facts": []}),
+    ],
+)
+def test_unconfigured_provider_stages_are_skipped_and_empty_sets_are_complete(
+    tmp_path,
+    rubric,
+) -> None:
+    service, _, extractor, signals = _service(
+        tmp_path,
+        profile=CandidateProfile(),
+        rubric=rubric,
+    )
+
+    record = service.analyze_job(JOB_DESCRIPTION)
+
+    assert record.status == "success"
+    assert len(extractor.calls) == (1 if rubric.facts else 0)
+    assert len(signals.calls) == (1 if rubric.questions else 0)
+    expected_stages = {
+        *({"facts"} if rubric.facts else set()),
+        *({"signals"} if rubric.questions else set()),
+    }
+    assert set(record.trace.providers) == expected_stages
+    assert set(record.trace.model_versions) == expected_stages
+    assert set(record.trace.prompt_versions) == expected_stages
+
+
+def test_non_jd_signal_rationale_is_discarded_not_hashed(tmp_path) -> None:
+    rationale = "model-only chain of thought rationale"
+    signals = FakeSignalProvider(
+        outputs=[
+            DecisionSignal(
+                question_id="role_fit",
+                question_version="question-v1",
+                probability=1,
+                evidence=[rationale],
+                provider="fake-signals",
+                model="signals-model-v1",
+            )
+        ]
+    )
+    service, _, _, _ = _service(
+        tmp_path,
+        profile=CandidateProfile(),
+        rubric=_rubric(),
+        signal_provider=signals,
+    )
+
+    record = service.analyze_job(JOB_DESCRIPTION)
+
+    assert record.signals[0].evidence == []
+    assert record.result is not None
+    assert record.result.needs_review is True
+    assert record.trace is not None
+    assert rationale not in record.model_dump_json()
+    assert "provider-evidence:" not in record.model_dump_json()
 
 
 def test_profile_identifiers_and_source_text_become_opaque_refs(tmp_path) -> None:
