@@ -106,10 +106,13 @@ async def test_tool_schemas_use_domain_contracts() -> None:
 async def test_memory_preview_requires_explicit_source_and_scope() -> None:
     tools = {tool.name: tool for tool in await _server().list_tools()}
     schema = tools["preview_agent_memory_import"].input_schema
+    confirm_schema = tools["confirm_agent_memory_import"].input_schema
 
     assert {"source_agent", "scope", "candidates"} <= set(schema["required"])
     assert schema["properties"]["source_agent"]["minLength"] == 1
     assert schema["properties"]["scope"]["minItems"] == 1
+    assert set(confirm_schema["required"]) == {"preview_id", "decisions"}
+    assert "preview" not in confirm_schema["properties"]
 
 
 @pytest.mark.asyncio
@@ -151,3 +154,25 @@ def test_start_script_uses_repo_local_project() -> None:
     assert 'uv run --project "$REPO_ROOT"' in script
     assert 'PYTHONPATH="$REPO_ROOT/src' in script
     assert "/Users/" not in script
+
+
+def test_mcp_config_declares_repo_root_working_directory() -> None:
+    config = json.loads((ROOT / ".mcp.json").read_text())
+    server = config["mcpServers"]["ai-dream-job-engine"]
+
+    assert server == {
+        "command": "./scripts/start-mcp.sh",
+        "args": [],
+        "cwd": ".",
+    }
+
+
+def test_mcp_dependency_uses_only_platform_bound_cryptography_cap() -> None:
+    project = (ROOT / "pyproject.toml").read_text()
+
+    assert '"mcp[cli]>=2,<3"' in project
+    assert (
+        '"cryptography<47; sys_platform == \'darwin\' '
+        'and platform_machine == \'arm64\'"'
+    ) in project
+    assert '"cryptography>=46,<47"' not in project

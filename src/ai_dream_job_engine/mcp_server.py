@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import secrets
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Lock
-from typing import Annotated, Protocol
+from threading import Lock, RLock
+from typing import Annotated, Callable, Protocol
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from ai_dream_job_engine.database import LocalStore
 from ai_dream_job_engine.models import (
@@ -41,6 +44,59 @@ from ai_dream_job_engine.service import AnalysisServiceError, JobAnalysisService
 NonEmptyString = Annotated[str, Field(min_length=1)]
 NonEmptyStrings = Annotated[list[str], Field(min_length=1)]
 
+PROFILE_NOT_INITIALIZED = (
+    "profile_not_initialized",
+    "Initialize the candidate profile before this action.",
+)
+MEMORY_PREVIEW_INVALID = (
+    "memory_preview_invalid",
+    "Request a new memory preview before confirming claims.",
+)
+INVALID_CLAIM_DECISIONS = (
+    "invalid_claim_decisions",
+    "Review the claim decisions and submit valid per-claim actions.",
+)
+INVALID_RUBRIC_PATCH = (
+    "invalid_rubric_patch",
+    "Review the rubric patch and submit valid rubric changes.",
+)
+STORAGE_FAILURE = (
+    "storage_failure",
+    "Local data could not be saved or loaded; retry the action.",
+)
+ANALYSIS_PROVIDER_CONFIG = (
+    "analysis_provider_config",
+    "Configure the selected analysis provider before analyzing a job.",
+)
+ANALYSIS_FAILURE = (
+    "analysis_failure",
+    "The analysis action could not be completed safely.",
+)
+INTERNAL_FAILURE = (
+    "internal_failure",
+    "The action could not be completed safely; retry it.",
+)
+
+
+class ApplicationError(RuntimeError):
+    """A fixed public error that cannot carry source exception context."""
+
+    def __init__(self, public_error: tuple[str, str]) -> None:
+        self.code, self.safe_message = public_error
+        super().__init__(f"{self.code}: {self.safe_message}")
+
+
+class IssuedMemoryImportPreview(BaseModel):
+    preview_id: str = Field(min_length=32)
+    preview: MemoryImportPreview
+
+
+@dataclass(frozen=True)
+class _RegisteredPreview:
+    profile_digest: str
+    binding_digest: str
+    preview: MemoryImportPreview
+
 
 class ProfileApplication(Protocol):
     def initialize_profile(self, profile: CandidateProfile) -> CandidateProfile: ...
@@ -56,11 +112,11 @@ class ProfileApplication(Protocol):
         source_agent: str,
         scope: list[str],
         candidates: list[CandidateClaim],
-    ) -> MemoryImportPreview: ...
+    ) -> IssuedMemoryImportPreview: ...
 
     def confirm_agent_memory_import(
         self,
-        preview: MemoryImportPreview,
+        preview_id: str,
         decisions: list[ClaimDecision],
     ) -> CandidateProfile: ...
 
@@ -95,16 +151,17 @@ class MCPServices:
 class _LazyLocalStore:
     """Initialize the caller-selected local database only on first use."""
 
-    def __init__(self, path: Path) -> None:
-        self._path = path
+    def __init__(self, path_factory: Callable[[], Path]) -> None:
+        self._path_factory = path_factory
         self._store: LocalStore | None = None
         self._lock = Lock()
 
     def _ready(self) -> LocalStore:
         with self._lock:
             if self._store is None:
-                self._path.parent.mkdir(parents=True, exist_ok=True)
-                store = LocalStore.open(self._path)
+                path = self._path_factory()
+                path.parent.mkdir(parents=True, exist_ok=True)
+                store = LocalStore.open(path)
                 store.initialize()
                 self._store = store
         return self._store
@@ -132,102 +189,188 @@ class _LazyLocalStore:
 
 
 class LocalProfileApplication:
-    def __init__(self, store: _LazyLocalStore) -> None:
+    def __init__(self, store) -> None:
         self._store = store
+        self._lock = RLock()
+        self._previews: dict[str, _RegisteredPreview] = {}
 
     def initialize_profile(self, profile: CandidateProfile) -> CandidateProfile:
-        self._store.save_profile(profile)
-        return profile
+        with self._lock:
+            self._save_profile(profile)
+            return profile
 
     def review_profile_claims(self) -> CandidateProfile:
-        return self._profile()
+        with self._lock:
+            return self._profile()
 
     def confirm_profile_claims(
         self, decisions: list[ClaimDecision]
     ) -> CandidateProfile:
-        updated = confirm_claims(self._profile(), decisions)
-        self._store.save_profile(updated)
-        return updated
+        with self._lock:
+            try:
+                updated = confirm_claims(self._profile(), decisions)
+            except ValueError:
+                raise ApplicationError(INVALID_CLAIM_DECISIONS) from None
+            self._save_profile(updated)
+            return updated
 
     def preview_agent_memory_import(
         self,
         source_agent: str,
         scope: list[str],
         candidates: list[CandidateClaim],
-    ) -> MemoryImportPreview:
-        if not source_agent.strip() or not scope or any(not item.strip() for item in scope):
-            raise ValueError("memory source and scope are required")
-        return preview_memory_import(
-            self._profile(), source_agent, scope, candidates
-        )
+    ) -> IssuedMemoryImportPreview:
+        with self._lock:
+            if (
+                not source_agent.strip()
+                or not scope
+                or any(not item.strip() for item in scope)
+            ):
+                raise ApplicationError(MEMORY_PREVIEW_INVALID)
+            profile = self._profile()
+            try:
+                preview = preview_memory_import(
+                    profile, source_agent, scope, candidates
+                )
+            except ValueError:
+                raise ApplicationError(MEMORY_PREVIEW_INVALID) from None
+            preview_id = self._new_preview_id()
+            registered_preview = preview.model_copy(deep=True)
+            self._previews[preview_id] = _RegisteredPreview(
+                profile_digest=_model_digest(profile),
+                binding_digest=_preview_binding_digest(
+                    profile, registered_preview
+                ),
+                preview=registered_preview,
+            )
+            return IssuedMemoryImportPreview(
+                preview_id=preview_id,
+                preview=preview.model_copy(deep=True),
+            )
 
     def confirm_agent_memory_import(
         self,
-        preview: MemoryImportPreview,
+        preview_id: str,
         decisions: list[ClaimDecision],
     ) -> CandidateProfile:
-        if (
-            not preview.source_agent.strip()
-            or not preview.scope
-            or any(not item.strip() for item in preview.scope)
-        ):
-            raise ValueError("a complete memory preview is required")
-        updated = confirm_claims(
-            self._profile(), decisions, preview=preview
-        )
-        self._store.save_profile(updated)
-        return updated
+        with self._lock:
+            issued = self._previews.get(preview_id)
+            if issued is None:
+                raise ApplicationError(MEMORY_PREVIEW_INVALID)
+            profile = self._profile()
+            if _model_digest(profile) != issued.profile_digest:
+                raise ApplicationError(MEMORY_PREVIEW_INVALID)
+            try:
+                reproduced = preview_memory_import(
+                    profile,
+                    issued.preview.source_agent,
+                    issued.preview.scope,
+                    issued.preview.candidates,
+                )
+            except ValueError:
+                raise ApplicationError(MEMORY_PREVIEW_INVALID) from None
+            if (
+                _preview_binding_digest(profile, reproduced)
+                != issued.binding_digest
+            ):
+                raise ApplicationError(MEMORY_PREVIEW_INVALID)
+            try:
+                updated = confirm_claims(
+                    profile, decisions, preview=issued.preview
+                )
+            except ValueError:
+                raise ApplicationError(INVALID_CLAIM_DECISIONS) from None
+            self._save_profile(updated)
+            del self._previews[preview_id]
+            return updated
 
     def disconnect_agent_memory(
         self, source_agent: str, delete_imported: bool
     ) -> CandidateProfile:
-        updated = disconnect_memory_source(
-            self._profile(), source_agent, delete_imported
-        )
-        self._store.save_profile(updated)
-        return updated
+        with self._lock:
+            try:
+                updated = disconnect_memory_source(
+                    self._profile(), source_agent, delete_imported
+                )
+            except ValueError:
+                raise ApplicationError(INVALID_CLAIM_DECISIONS) from None
+            self._save_profile(updated)
+            return updated
 
     def _profile(self) -> CandidateProfile:
-        profile = self._store.load_profile()
+        try:
+            profile = self._store.load_profile()
+        except Exception:
+            raise ApplicationError(STORAGE_FAILURE) from None
         if profile is None:
-            raise ValueError("profile is not initialized")
+            raise ApplicationError(PROFILE_NOT_INITIALIZED)
         return profile
+
+    def _save_profile(self, profile: CandidateProfile) -> None:
+        try:
+            self._store.save_profile(profile)
+        except Exception:
+            raise ApplicationError(STORAGE_FAILURE) from None
+
+    def _new_preview_id(self) -> str:
+        while True:
+            preview_id = secrets.token_urlsafe(32)
+            if preview_id not in self._previews:
+                return preview_id
 
 
 class LocalRubricApplication:
-    def __init__(self, store: _LazyLocalStore) -> None:
+    def __init__(self, store) -> None:
         self._store = store
+        self._lock = RLock()
 
     def get_rubric(self) -> Rubric:
-        rubric = self._store.load_rubric()
-        if rubric is None:
-            rubric = load_default_rubric()
-            self._store.save_rubric(rubric)
-        return rubric
+        with self._lock:
+            return self._get_rubric()
 
     def update_rubric(self, patch: RubricPatch) -> Rubric:
-        updated = apply_rubric_patch(self.get_rubric(), patch)
-        self._store.save_rubric(updated)
-        return updated
+        with self._lock:
+            try:
+                updated = apply_rubric_patch(self._get_rubric(), patch)
+            except ValueError:
+                raise ApplicationError(INVALID_RUBRIC_PATCH) from None
+            self._save_rubric(updated)
+            return updated
+
+    def _get_rubric(self) -> Rubric:
+        try:
+            rubric = self._store.load_rubric()
+        except Exception:
+            raise ApplicationError(STORAGE_FAILURE) from None
+        if rubric is None:
+            rubric = load_default_rubric()
+            self._save_rubric(rubric)
+        return rubric
+
+    def _save_rubric(self, rubric: Rubric) -> None:
+        try:
+            self._store.save_rubric(rubric)
+        except Exception:
+            raise ApplicationError(STORAGE_FAILURE) from None
 
 
 class ConfiguredAnalysisApplication:
-    def __init__(self, store: _LazyLocalStore) -> None:
+    def __init__(self, store) -> None:
         self._store = store
 
     def analyze_job(self, job_description: str) -> AnalysisRecord:
-        profile = self._store.load_profile()
-        rubric = self._store.load_rubric()
+        try:
+            profile = self._store.load_profile()
+            rubric = self._store.load_rubric()
+        except Exception:
+            raise ApplicationError(STORAGE_FAILURE) from None
         if profile is None or rubric is None:
             return self._service().analyze_job(job_description)
         try:
             facts = self._fact_provider() if rubric.facts else None
             signals = self._signal_provider() if rubric.questions else None
         except (ProviderError, ValueError):
-            raise AnalysisServiceError(
-                "provider_not_configured",
-                "Selected analysis provider is not configured.",
-            ) from None
+            raise ApplicationError(ANALYSIS_PROVIDER_CONFIG) from None
         return self._service(facts, signals).analyze_job(job_description)
 
     def recompute_decision(self, analysis_id: str) -> AnalysisRecord:
@@ -273,15 +416,41 @@ class _UnavailableSignalProvider:
         raise ProviderError("signal provider is unavailable")
 
 
-def default_services() -> MCPServices:
-    project_root = Path(__file__).resolve().parents[2]
+def _model_digest(model: BaseModel) -> str:
+    payload = json.dumps(
+        model.model_dump(mode="json"),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _preview_binding_digest(
+    profile: CandidateProfile, preview: MemoryImportPreview
+) -> str:
+    payload = json.dumps(
+        {
+            "profile": profile.model_dump(mode="json"),
+            "preview": preview.model_dump(mode="json"),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _default_database_path() -> Path:
     configured_path = os.getenv("AI_DREAM_JOB_DATA_PATH")
-    database_path = (
-        Path(configured_path).expanduser()
-        if configured_path
-        else project_root / ".data" / "ai-dream-job-engine.sqlite3"
-    )
-    store = _LazyLocalStore(database_path)
+    if configured_path:
+        return Path(configured_path).expanduser()
+    project_root = Path(__file__).resolve().parents[2]
+    return project_root / ".data" / "ai-dream-job-engine.sqlite3"
+
+
+def default_services() -> MCPServices:
+    store = _LazyLocalStore(_default_database_path)
     return MCPServices(
         profile=LocalProfileApplication(store),
         rubric=LocalRubricApplication(store),
@@ -289,13 +458,33 @@ def default_services() -> MCPServices:
     )
 
 
-def _call_safely(label: str, operation):
+def _analysis_public_error(error: AnalysisServiceError) -> tuple[str, str]:
+    if error.code == "missing_profile":
+        return PROFILE_NOT_INITIALIZED
+    if error.code == "provider_not_configured":
+        return ANALYSIS_PROVIDER_CONFIG
+    if error.code in {
+        "storage_failed",
+        "failure_audit_persistence_failed",
+    }:
+        return STORAGE_FAILURE
+    return ANALYSIS_FAILURE
+
+
+def _call_safely(operation):
     try:
         return operation()
-    except AnalysisServiceError as error:
+    except ApplicationError as error:
         raise ToolError(str(error)) from None
+    except AnalysisServiceError as error:
+        public_error = _analysis_public_error(error)
+        raise ToolError(
+            f"{public_error[0]}: {public_error[1]}"
+        ) from None
     except Exception:
-        raise ToolError(f"{label} failed safely.") from None
+        raise ToolError(
+            f"{INTERNAL_FAILURE[0]}: {INTERNAL_FAILURE[1]}"
+        ) from None
 
 
 def build_server(services: MCPServices | None = None) -> MCPServer:
@@ -311,16 +500,13 @@ def build_server(services: MCPServices | None = None) -> MCPServer:
     def initialize_profile(profile: CandidateProfile) -> CandidateProfile:
         """Initialize the local candidate profile from host-supplied claims."""
         return _call_safely(
-            "Profile initialization",
             lambda: applications.profile.initialize_profile(profile),
         )
 
     @server.tool()
     def review_profile_claims() -> CandidateProfile:
         """Review current claims before confirming or editing them."""
-        return _call_safely(
-            "Profile review", applications.profile.review_profile_claims
-        )
+        return _call_safely(applications.profile.review_profile_claims)
 
     @server.tool()
     def confirm_profile_claims(
@@ -328,7 +514,6 @@ def build_server(services: MCPServices | None = None) -> MCPServer:
     ) -> CandidateProfile:
         """Apply explicit per-claim user decisions."""
         return _call_safely(
-            "Claim confirmation",
             lambda: applications.profile.confirm_profile_claims(decisions),
         )
 
@@ -337,10 +522,9 @@ def build_server(services: MCPServices | None = None) -> MCPServer:
         source_agent: NonEmptyString,
         scope: NonEmptyStrings,
         candidates: list[CandidateClaim],
-    ) -> MemoryImportPreview:
+    ) -> IssuedMemoryImportPreview:
         """Preview explicit host-supplied memory candidates without mutation."""
         return _call_safely(
-            "Memory preview",
             lambda: applications.profile.preview_agent_memory_import(
                 source_agent, scope, candidates
             ),
@@ -348,14 +532,13 @@ def build_server(services: MCPServices | None = None) -> MCPServer:
 
     @server.tool()
     def confirm_agent_memory_import(
-        preview: MemoryImportPreview,
+        preview_id: NonEmptyString,
         decisions: list[ClaimDecision],
     ) -> CandidateProfile:
         """Confirm selected claims from a prior memory preview."""
         return _call_safely(
-            "Memory confirmation",
             lambda: applications.profile.confirm_agent_memory_import(
-                preview, decisions
+                preview_id, decisions
             ),
         )
 
@@ -366,7 +549,6 @@ def build_server(services: MCPServices | None = None) -> MCPServer:
     ) -> CandidateProfile:
         """Disconnect a source and optionally delete its confirmed imports."""
         return _call_safely(
-            "Memory disconnect",
             lambda: applications.profile.disconnect_agent_memory(
                 source_agent, delete_imported
             ),
@@ -375,20 +557,19 @@ def build_server(services: MCPServices | None = None) -> MCPServer:
     @server.tool()
     def get_rubric() -> Rubric:
         """Return the active local decision rubric."""
-        return _call_safely("Rubric read", applications.rubric.get_rubric)
+        return _call_safely(applications.rubric.get_rubric)
 
     @server.tool()
     def update_rubric(patch: RubricPatch) -> Rubric:
         """Apply a validated declarative patch to the active rubric."""
         return _call_safely(
-            "Rubric update", lambda: applications.rubric.update_rubric(patch)
+            lambda: applications.rubric.update_rubric(patch)
         )
 
     @server.tool()
     def analyze_job(job_description: NonEmptyString) -> AnalysisRecord:
         """Analyze host-supplied public job text with configured providers."""
         return _call_safely(
-            "Job analysis",
             lambda: applications.analysis.analyze_job(job_description),
         )
 
@@ -396,7 +577,6 @@ def build_server(services: MCPServices | None = None) -> MCPServer:
     def recompute_decision(analysis_id: NonEmptyString) -> AnalysisRecord:
         """Recompute a stored decision without another provider call."""
         return _call_safely(
-            "Decision recompute",
             lambda: applications.analysis.recompute_decision(analysis_id),
         )
 
@@ -404,16 +584,13 @@ def build_server(services: MCPServices | None = None) -> MCPServer:
     def get_decision_trace(analysis_id: NonEmptyString) -> DecisionTrace:
         """Return the validated structured trace for a stored decision."""
         return _call_safely(
-            "Decision trace",
             lambda: applications.analysis.get_decision_trace(analysis_id),
         )
 
     @server.tool()
     def list_analyzed_jobs() -> list[AnalysisSummary]:
         """List structured summaries of successful local analyses."""
-        return _call_safely(
-            "Analysis listing", applications.analysis.list_analyzed_jobs
-        )
+        return _call_safely(applications.analysis.list_analyzed_jobs)
 
     return server
 

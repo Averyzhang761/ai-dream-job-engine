@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Local-first, evidence-backed AI job decision engine"
 requires-python = ">=3.12,<3.14"
 dependencies = [
-    "cryptography>=46,<47",
+    "cryptography<47; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "pydantic>=2.12,<3",
     "openai>=3.24,<4",
     "httpx>=0.28,<1",
