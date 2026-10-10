@@ -1,0 +1,239 @@
+{
+  "id": "ai-job-default",
+  "version": "ai-job-v1",
+  "facts": [
+    {
+      "id": "role_family",
+      "name": "Role family",
+      "definition": "The primary engineering or product role family named by the job.",
+      "data_type": "text",
+      "extraction_instructions": "Extract the primary role family from the title and responsibilities.",
+      "requires_evidence": true,
+      "missing_policy": "unknown",
+      "default_value": null,
+      "enum_values": []
+    },
+    {
+      "id": "ai_scope",
+      "name": "Applied AI scope",
+      "definition": "How directly the role builds, evaluates, or operates AI-enabled product capabilities.",
+      "data_type": "text",
+      "extraction_instructions": "Extract explicit AI responsibilities and the systems or product outcomes they support.",
+      "requires_evidence": true,
+      "missing_policy": "unknown",
+      "default_value": null,
+      "enum_values": []
+    },
+    {
+      "id": "product_customer_scope",
+      "name": "Product and customer scope",
+      "definition": "The role's direct interaction with product decisions, users, or customers.",
+      "data_type": "text",
+      "extraction_instructions": "Extract explicit product ownership, user research, customer, or stakeholder responsibilities.",
+      "requires_evidence": true,
+      "missing_policy": "unknown",
+      "default_value": null,
+      "enum_values": []
+    },
+    {
+      "id": "ownership_scope",
+      "name": "Ownership and impact scope",
+      "definition": "The decisions, delivery scope, and measurable outcomes owned by the role.",
+      "data_type": "text",
+      "extraction_instructions": "Extract explicit ownership language and expected business, user, or technical outcomes.",
+      "requires_evidence": true,
+      "missing_policy": "unknown",
+      "default_value": null,
+      "enum_values": []
+    },
+    {
+      "id": "infrastructure_scope",
+      "name": "Infrastructure scope",
+      "definition": "How much of the role is limited to general platform or infrastructure work without an applied AI outcome.",
+      "data_type": "text",
+      "extraction_instructions": "Extract platform, reliability, data, model-serving, and application responsibilities without inferring unstated allocation.",
+      "requires_evidence": true,
+      "missing_policy": "unknown",
+      "default_value": null,
+      "enum_values": []
+    },
+    {
+      "id": "work_arrangement_terms",
+      "name": "Work arrangement",
+      "definition": "The location, remote, hybrid, onsite, and travel terms stated by the job.",
+      "data_type": "text",
+      "extraction_instructions": "Extract only explicit work location, attendance, relocation, and travel terms.",
+      "requires_evidence": true,
+      "missing_policy": "unknown",
+      "default_value": null,
+      "enum_values": []
+    },
+    {
+      "id": "compensation_terms",
+      "name": "Compensation",
+      "definition": "The salary range and other compensation terms stated by the job.",
+      "data_type": "text",
+      "extraction_instructions": "Extract stated base salary, variable compensation, equity, and currency without estimating missing values.",
+      "requires_evidence": true,
+      "missing_policy": "unknown",
+      "default_value": null,
+      "enum_values": []
+    },
+    {
+      "id": "work_authorization_requirement",
+      "name": "Work authorization requirement",
+      "definition": "Any explicit employment authorization, citizenship, clearance, or sponsorship requirement.",
+      "data_type": "text",
+      "extraction_instructions": "Extract explicit authorization, citizenship, clearance, and sponsorship statements.",
+      "requires_evidence": true,
+      "missing_policy": "unknown",
+      "default_value": null,
+      "enum_values": []
+    }
+  ],
+  "dimensions": [
+    {
+      "id": "role_family_fit",
+      "name": "Role family fit",
+      "definition": "Whether the role belongs to an AI engineering, applied science, or AI product family.",
+      "examples": ["Applied AI engineer", "Machine learning product engineer"],
+      "fact_ids": ["role_family"],
+      "signal_ids": [],
+      "weight": 1.0,
+      "scoring_direction": "higher_is_better",
+      "positive_keywords": ["applied AI", "machine learning engineer", "AI product"],
+      "negative_keywords": ["non-technical sales", "general accounting"],
+      "hard_constraint": false,
+      "threshold": 0.5,
+      "explanation_template": "Role-family evidence: {evidence}"
+    },
+    {
+      "id": "applied_ai_depth",
+      "name": "Applied AI depth",
+      "definition": "The depth of responsibility for building and evaluating AI-enabled behavior in a product or workflow.",
+      "examples": ["Build retrieval and evaluation pipelines", "Ship model-backed user features"],
+      "fact_ids": ["ai_scope"],
+      "signal_ids": ["applied_ai"],
+      "weight": 1.5,
+      "scoring_direction": "higher_is_better",
+      "positive_keywords": ["LLM", "evaluation", "RAG", "agents", "model integration"],
+      "negative_keywords": ["AI exposure not required", "no model development"],
+      "hard_constraint": false,
+      "threshold": 0.6,
+      "explanation_template": "Applied-AI evidence: {evidence}"
+    },
+    {
+      "id": "product_customer_proximity",
+      "name": "Product and customer proximity",
+      "definition": "How directly the role shapes product decisions and learns from users or customers.",
+      "examples": ["Partner with product and design", "Interview customers and iterate"],
+      "fact_ids": ["product_customer_scope"],
+      "signal_ids": ["product_facing"],
+      "weight": 1.0,
+      "scoring_direction": "higher_is_better",
+      "positive_keywords": ["customers", "users", "product roadmap", "experiments"],
+      "negative_keywords": ["internal platform only", "no customer interaction"],
+      "hard_constraint": false,
+      "threshold": 0.5,
+      "explanation_template": "Product and customer evidence: {evidence}"
+    },
+    {
+      "id": "ownership_impact",
+      "name": "Ownership and impact",
+      "definition": "The degree of end-to-end ownership and measurable impact expected from the role.",
+      "examples": ["Own delivery from discovery through launch", "Define and track outcome metrics"],
+      "fact_ids": ["ownership_scope"],
+      "signal_ids": [],
+      "weight": 1.0,
+      "scoring_direction": "higher_is_better",
+      "positive_keywords": ["own", "lead", "launch", "measure impact"],
+      "negative_keywords": ["ticket execution only", "closely supervised"],
+      "hard_constraint": false,
+      "threshold": 0.5,
+      "explanation_template": "Ownership evidence: {evidence}"
+    },
+    {
+      "id": "infrastructure_balance",
+      "name": "Infrastructure balance",
+      "definition": "Whether infrastructure work supports a stated AI or product outcome rather than being the role's only scope.",
+      "examples": ["Operate model serving for a user-facing feature", "Build a general compute platform only"],
+      "fact_ids": ["infrastructure_scope"],
+      "signal_ids": ["pure_infrastructure"],
+      "weight": 0.75,
+      "scoring_direction": "lower_is_better",
+      "positive_keywords": ["model serving", "AI platform", "product integration"],
+      "negative_keywords": ["pure infrastructure", "general platform only"],
+      "hard_constraint": false,
+      "threshold": 0.5,
+      "explanation_template": "Infrastructure-balance evidence: {evidence}"
+    },
+    {
+      "id": "work_arrangement",
+      "name": "Work arrangement",
+      "definition": "The explicit work-location and attendance terms available for comparison with confirmed preferences.",
+      "examples": ["Hybrid three days per week", "Remote within a named country"],
+      "fact_ids": ["work_arrangement_terms"],
+      "signal_ids": [],
+      "weight": 0.75,
+      "scoring_direction": "higher_is_better",
+      "positive_keywords": ["remote", "hybrid", "flexible"],
+      "negative_keywords": ["onsite required", "frequent travel"],
+      "hard_constraint": false,
+      "threshold": null,
+      "explanation_template": "Work-arrangement evidence: {evidence}"
+    },
+    {
+      "id": "compensation",
+      "name": "Compensation",
+      "definition": "The explicit compensation information available for comparison with confirmed requirements.",
+      "examples": ["Published base salary range", "Equity eligibility stated"],
+      "fact_ids": ["compensation_terms"],
+      "signal_ids": [],
+      "weight": 0.75,
+      "scoring_direction": "higher_is_better",
+      "positive_keywords": ["salary range", "equity", "bonus"],
+      "negative_keywords": ["unpaid", "commission only"],
+      "hard_constraint": false,
+      "threshold": null,
+      "explanation_template": "Compensation evidence: {evidence}"
+    },
+    {
+      "id": "work_authorization",
+      "name": "Work authorization",
+      "definition": "Whether explicit authorization requirements conflict with confirmed candidate facts.",
+      "examples": ["Sponsorship available", "Citizenship and clearance required"],
+      "fact_ids": ["work_authorization_requirement"],
+      "signal_ids": [],
+      "weight": 1.0,
+      "scoring_direction": "higher_is_better",
+      "positive_keywords": ["sponsorship available", "open to work authorization"],
+      "negative_keywords": ["no sponsorship", "citizenship required", "active clearance required"],
+      "hard_constraint": true,
+      "threshold": null,
+      "explanation_template": "Work-authorization evidence: {evidence}"
+    }
+  ],
+  "questions": [
+    {
+      "id": "product_facing",
+      "version": "1",
+      "question": "Does the role directly shape a product or interact with users or customers?"
+    },
+    {
+      "id": "applied_ai",
+      "version": "1",
+      "question": "Does the role build, evaluate, or operate AI capabilities tied to a concrete product or workflow?"
+    },
+    {
+      "id": "pure_infrastructure",
+      "version": "1",
+      "question": "Is the role limited to general infrastructure without a stated applied AI or product outcome?"
+    }
+  ],
+  "recommendation_thresholds": {
+    "priority_apply": 0.8,
+    "apply_after_review": 0.6,
+    "hold": 0.4,
+    "skip": 0.0
+  }
+}
