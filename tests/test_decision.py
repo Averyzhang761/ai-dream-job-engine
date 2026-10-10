@@ -1,3 +1,9 @@
+from copy import deepcopy
+import os
+from pathlib import Path
+import subprocess
+import sys
+
 import pytest
 
 from ai_dream_job_engine.decision import decide_job
@@ -14,6 +20,7 @@ from ai_dream_job_engine.models import (
     Rubric,
     ValueDimension,
 )
+from ai_dream_job_engine.rubric import load_default_rubric
 
 
 def _rubric() -> Rubric:
@@ -142,6 +149,12 @@ def _strong_claims() -> list[CandidateClaim]:
     ]
 
 
+def _with_fact_type(fact: FactDefinition, data_type: str) -> FactDefinition:
+    payload = fact.model_dump(mode="python")
+    payload["data_type"] = data_type
+    return FactDefinition.model_validate(payload)
+
+
 @pytest.mark.parametrize(
     ("case", "preferred", "claims", "recommendation", "gap_kind"),
     [
@@ -212,7 +225,10 @@ def test_decision_table(
         [] if gap_kind is None else [gap_kind]
     )
     assert all(gap.input_ids for gap in result.gaps)
-    assert all(gap.job_evidence or gap.candidate_evidence for gap in result.gaps)
+    assert all(
+        gap.job_evidence or gap.candidate_evidence or gap.missing_evidence
+        for gap in result.gaps
+    )
 
 
 def test_unconfirmed_agent_suggestion_changes_neither_score_nor_gaps() -> None:
@@ -291,3 +307,332 @@ def test_normalized_input_order_produces_byte_identical_result() -> None:
             *first.qualification_contributions,
         ]
     )
+
+
+def test_result_is_byte_identical_across_processes() -> None:
+    script = """
+import runpy
+ns = runpy.run_path('tests/test_decision.py')
+result = ns['decide_job'](
+    ns['_facts'](),
+    ns['_signals'](),
+    ns['CandidateProfile'](claims=ns['_strong_claims']()),
+    ns['_rubric'](),
+)
+print(result.model_dump_json())
+"""
+    root = Path(__file__).parents[1]
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(root / "src")
+    outputs = [
+        subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=root,
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        for _ in range(2)
+    ]
+
+    assert outputs[0] == outputs[1]
+
+
+@pytest.mark.parametrize("candidate_value", ["unknown", "unavailable", "invalid"])
+def test_unknown_candidate_text_requires_review_not_capability_gap(
+    candidate_value: str,
+) -> None:
+    rubric = _rubric()
+    rubric.facts[1] = _with_fact_type(rubric.facts[1], "text")
+    rubric.dimensions[1] = rubric.dimensions[1].model_copy(
+        update={"positive_keywords": ["python"]}
+    )
+    facts = _facts()
+    facts[1] = _fact("python_required", "python", "JD Python requirement")
+    claims = [
+        _claim("claim-python", "python_required", candidate_value),
+        _strong_claims()[1],
+    ]
+
+    result = decide_job(facts, _signals(), CandidateProfile(claims=claims), rubric)
+
+    assert result.recommendation is RecommendationLevel.APPLY_AFTER_REVIEW
+    assert result.qualification_score == 1
+    assert [gap.kind for gap in result.gaps] == [GapKind.EVIDENCE_GAP]
+
+
+@pytest.mark.parametrize(
+    ("data_type", "job_value", "candidate_value"),
+    [
+        ("text", ["python"], "python"),
+        ("list", "python", ["python"]),
+        ("text", "python", ["python"]),
+        ("list", ["python"], "python"),
+    ],
+)
+def test_text_and_list_values_must_match_fact_definition(
+    data_type: str,
+    job_value: object,
+    candidate_value: object,
+) -> None:
+    rubric = _rubric()
+    rubric.facts[1] = _with_fact_type(rubric.facts[1], data_type)
+    rubric.dimensions[1] = rubric.dimensions[1].model_copy(
+        update={"positive_keywords": ["python"]}
+    )
+    facts = _facts()
+    facts[1] = _fact("python_required", job_value, "JD Python requirement")
+    claims = [
+        _claim("claim-python", "python_required", candidate_value),
+        _strong_claims()[1],
+    ]
+
+    with pytest.raises(ValueError, match="python_required"):
+        decide_job(facts, _signals(), CandidateProfile(claims=claims), rubric)
+
+
+def test_absent_source_evidence_is_explicit_and_never_fabricated() -> None:
+    facts = _facts()
+    facts[1] = ExtractedFact(fact_id="python_required", is_unknown=True)
+    claims = [
+        CandidateClaim(
+            id="claim-auth",
+            claim_type="work_authorized",
+            value=True,
+            source=ClaimSource.USER_CONFIRMED,
+            confirmed=True,
+        )
+    ]
+
+    result = decide_job(facts, _signals(), CandidateProfile(claims=claims), _rubric())
+    python_gap = next(gap for gap in result.gaps if gap.subject_id == "python_required")
+
+    assert python_gap.missing_evidence is True
+    assert python_gap.job_evidence == []
+    assert python_gap.candidate_evidence == []
+    assert python_gap.input_ids == ["python_required"]
+    assert all(
+        not evidence.startswith(("fact:", "signal:", "user_confirmed:"))
+        for gap in result.gaps
+        for evidence in [*gap.job_evidence, *gap.candidate_evidence]
+    )
+
+
+def test_confirmed_claim_without_source_evidence_requires_review() -> None:
+    claims = [
+        CandidateClaim(
+            id="claim-python",
+            claim_type="python_required",
+            value=True,
+            source=ClaimSource.RESUME_EVIDENCE,
+            confirmed=True,
+        ),
+        _strong_claims()[1],
+    ]
+
+    result = decide_job(_facts(), _signals(), CandidateProfile(claims=claims), _rubric())
+    gap = next(gap for gap in result.gaps if gap.subject_id == "python_required")
+
+    assert gap.kind is GapKind.EVIDENCE_GAP
+    assert gap.missing_evidence is True
+    assert gap.candidate_evidence == []
+    assert result.qualification_score == 1
+
+
+def test_duplicate_candidate_claim_ids_are_rejected_before_selection() -> None:
+    claims = [
+        _claim("duplicate", "python_required", True),
+        _claim("duplicate", "work_authorized", True),
+    ]
+
+    with pytest.raises(ValueError, match="duplicate candidate claim id 'duplicate'"):
+        decide_job(_facts(), _signals(), CandidateProfile(claims=claims), _rubric())
+
+
+def test_unreferenced_required_fact_still_requires_review() -> None:
+    rubric = _rubric()
+    rubric.facts.append(
+        FactDefinition(
+            id="unreferenced_required",
+            name="Unreferenced requirement",
+            definition="A required fact outside all dimensions.",
+            data_type="boolean",
+            extraction_instructions="Extract the requirement.",
+        )
+    )
+
+    result = decide_job(_facts(), _signals(), CandidateProfile(claims=_strong_claims()), rubric)
+    gap = next(gap for gap in result.gaps if gap.subject_id == "unreferenced_required")
+
+    assert result.recommendation is RecommendationLevel.APPLY_AFTER_REVIEW
+    assert result.needs_review is True
+    assert gap.kind is GapKind.EVIDENCE_GAP
+    assert gap.missing_evidence is True
+
+
+def test_dimension_threshold_equality_passes_and_above_boundary_fails() -> None:
+    facts = _facts(preferred=False)
+    signals = _signals(1)
+    at_boundary = _rubric()
+    above_boundary = _rubric()
+    above_boundary.dimensions[0] = above_boundary.dimensions[0].model_copy(
+        update={"threshold": 0.500001}
+    )
+
+    passing = decide_job(
+        facts, signals, CandidateProfile(claims=_strong_claims()), at_boundary
+    )
+    failing = decide_job(
+        facts, signals, CandidateProfile(claims=_strong_claims()), above_boundary
+    )
+
+    passing_preference = next(
+        item for item in passing.preference_contributions if item.subject_id == "preference"
+    )
+    failing_preference = next(
+        item for item in failing.preference_contributions if item.subject_id == "preference"
+    )
+    assert passing_preference.score == 1
+    assert passing.recommendation is RecommendationLevel.PRIORITY_APPLY
+    assert failing_preference.score == 0
+    assert failing.recommendation is RecommendationLevel.SKIP
+
+
+def test_zero_weight_dimension_is_disabled() -> None:
+    rubric = _rubric()
+    rubric.dimensions[0] = rubric.dimensions[0].model_copy(update={"weight": 0})
+    facts = [fact for fact in _facts() if fact.fact_id != "preferred_role"]
+
+    result = decide_job(
+        facts, [], CandidateProfile(claims=_strong_claims()), rubric
+    )
+
+    assert result.recommendation is RecommendationLevel.PRIORITY_APPLY
+    assert all(item.subject_id != "preference" for item in result.preference_contributions)
+    assert all(gap.subject_id not in {"preferred_role", "preference_signal"} for gap in result.gaps)
+
+
+def test_zero_weight_hard_dimension_cannot_create_hard_blocker() -> None:
+    rubric = _rubric()
+    rubric.facts[2] = rubric.facts[2].model_copy(update={"requires_evidence": False})
+    rubric.dimensions[2] = rubric.dimensions[2].model_copy(update={"weight": 0})
+    claims = [
+        _strong_claims()[0],
+        _claim("claim-auth", "work_authorized", False, ClaimSource.USER_CONFIRMED),
+    ]
+
+    result = decide_job(_facts(), _signals(), CandidateProfile(claims=claims), rubric)
+
+    assert all(gap.kind is not GapKind.HARD_BLOCKER for gap in result.gaps)
+
+
+def test_stale_signal_question_version_requires_review() -> None:
+    stale_signal = DecisionSignal(
+        question_id="preference_signal",
+        question_version="stale",
+        probability=1,
+        evidence=["stale classifier output"],
+    )
+
+    result = decide_job(
+        _facts(),
+        [stale_signal],
+        CandidateProfile(claims=_strong_claims()),
+        _rubric(),
+    )
+
+    gap = next(gap for gap in result.gaps if gap.subject_id == "preference_signal")
+    assert result.recommendation is RecommendationLevel.APPLY_AFTER_REVIEW
+    assert gap.job_evidence == ["stale classifier output"]
+    assert all(
+        "preference_signal" not in contribution.input_ids
+        for contribution in result.preference_contributions
+    )
+
+
+def test_inputs_are_not_mutated() -> None:
+    facts = _facts()
+    signals = _signals()
+    profile = CandidateProfile(claims=_strong_claims())
+    rubric = _rubric()
+    before = deepcopy((facts, signals, profile, rubric))
+
+    decide_job(facts, signals, profile, rubric)
+
+    assert (facts, signals, profile, rubric) == before
+
+
+def test_complete_favorable_default_rubric_fixture_is_priority_apply() -> None:
+    rubric = load_default_rubric()
+    values = {
+        "role_family": "applied AI",
+        "ai_scope": "LLM evaluation",
+        "product_customer_scope": "customers",
+        "ownership_scope": "own launch",
+        "infrastructure_scope": "model serving",
+        "work_arrangement_terms": ["remote"],
+        "compensation_terms": "salary range",
+        "work_authorization_requirement": ["sponsorship available"],
+    }
+    facts = [
+        _fact(fact.id, values[fact.id], f"JD evidence:{fact.id}")
+        for fact in rubric.facts
+    ]
+    claims = [
+        _claim(f"claim:{fact.id}", fact.id, values[fact.id])
+        for fact in rubric.facts
+    ]
+    signals = [
+        DecisionSignal(
+            question_id=question.id,
+            question_version=question.version,
+            probability=0 if question.id == "pure_infrastructure" else 1,
+            evidence=[f"signal evidence:{question.id}"],
+        )
+        for question in rubric.questions
+    ]
+
+    result = decide_job(facts, signals, CandidateProfile(claims=claims), rubric)
+
+    assert result.recommendation is RecommendationLevel.PRIORITY_APPLY
+    assert result.preference_score == 1
+    assert result.qualification_score == 1
+    assert result.gaps == []
+
+
+def test_empty_confirmed_list_is_an_explicit_capability_gap() -> None:
+    rubric = _rubric()
+    rubric.facts[1] = _with_fact_type(rubric.facts[1], "list")
+    rubric.dimensions[1] = rubric.dimensions[1].model_copy(
+        update={"positive_keywords": ["python"]}
+    )
+    facts = _facts()
+    facts[1] = _fact("python_required", ["python"], "JD Python requirement")
+    claims = [
+        _claim("claim-python", "python_required", []),
+        _strong_claims()[1],
+    ]
+
+    result = decide_job(facts, _signals(), CandidateProfile(claims=claims), rubric)
+
+    assert any(gap.kind is GapKind.CAPABILITY_GAP for gap in result.gaps)
+
+
+def test_list_with_unknown_candidate_value_requires_review() -> None:
+    rubric = _rubric()
+    rubric.facts[1] = _with_fact_type(rubric.facts[1], "list")
+    rubric.dimensions[1] = rubric.dimensions[1].model_copy(
+        update={"positive_keywords": ["python"]}
+    )
+    facts = _facts()
+    facts[1] = _fact("python_required", ["python"], "JD Python requirement")
+    claims = [
+        _claim("claim-python", "python_required", ["python", "unknown"]),
+        _strong_claims()[1],
+    ]
+
+    result = decide_job(facts, _signals(), CandidateProfile(claims=claims), rubric)
+
+    assert result.recommendation is RecommendationLevel.APPLY_AFTER_REVIEW
+    assert any(gap.kind is GapKind.EVIDENCE_GAP for gap in result.gaps)

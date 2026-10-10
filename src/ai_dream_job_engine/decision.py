@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import math
 from typing import Any, Iterable
 
 from ai_dream_job_engine.models import (
-    CandidateClaim,
     CandidateProfile,
     ClaimSource,
     DecisionContribution,
@@ -27,7 +27,27 @@ from ai_dream_job_engine.rubric import _validate_rubric
 
 
 _ACTIVE_SOURCES = {ClaimSource.RESUME_EVIDENCE, ClaimSource.USER_CONFIRMED}
-_FALSE_TEXT = {"false", "no", "none", "missing", "lack", "lacks", "not held"}
+_UNKNOWN_VALUES = {"unknown", "unavailable", "invalid"}
+_UNRESOLVED = object()
+
+
+@dataclass(frozen=True)
+class _Value:
+    id: str
+    value: Any
+    evidence: tuple[str, ...]
+    missing_evidence: bool
+
+    @property
+    def ready(self) -> bool:
+        return self.value is not _UNRESOLVED
+
+
+@dataclass(frozen=True)
+class _Inputs:
+    facts: dict[str, _Value]
+    signals: dict[str, _Value]
+    claims: dict[str, tuple[_Value, ...]]
 
 
 def decide_job(
@@ -37,193 +57,327 @@ def decide_job(
     rubric: Rubric,
 ) -> DecisionResult:
     """Return a deterministic recommendation from validated local inputs."""
-    _validate_rubric(rubric)
-    facts_by_id = _unique_by_id(facts, "fact_id", "fact")
-    signals_by_id = _unique_by_id(signals, "question_id", "signal")
-    fact_definitions = {fact.id: fact for fact in rubric.facts}
-    active_claims = _active_claims(profile.claims)
+    inputs = _normalize(facts, signals, profile, rubric)
+    preference, preference_gaps = _preference(inputs, rubric)
+    qualification, qualification_gaps, blockers = _qualification(inputs, rubric)
+    preference_score = _weighted(preference)
+    qualification_score = _weighted(qualification)
 
-    preference_contributions: list[DecisionContribution] = []
-    review_gaps: list[Gap] = []
-    needs_review = False
-
-    for dimension in sorted(rubric.dimensions, key=lambda item: item.id):
-        scored_inputs: list[tuple[float, str, list[str]]] = []
-        dimension_needs_review = False
-
-        for fact_id in sorted(dimension.fact_ids):
-            definition = fact_definitions[fact_id]
-            fact = facts_by_id.get(fact_id)
-            if fact is None or fact.is_unknown:
-                dimension_needs_review = True
-                if definition.requires_evidence:
-                    review_gaps.append(_unknown_fact_gap(definition, fact))
-                continue
-            if definition.requires_evidence and not fact.evidence:
-                dimension_needs_review = True
-                review_gaps.append(_unknown_fact_gap(definition, fact))
-                continue
-            score = _fact_score(fact.value, definition, dimension)
-            if score is None:
-                dimension_needs_review = True
-                if definition.requires_evidence:
-                    review_gaps.append(_unknown_fact_gap(definition, fact))
-                continue
-            scored_inputs.append((score, fact.fact_id, sorted(fact.evidence)))
-
-        for signal_id in sorted(dimension.signal_ids):
-            signal = signals_by_id.get(signal_id)
-            if (
-                signal is None
-                or signal.status is not SignalStatus.AVAILABLE
-                or not signal.evidence
-            ):
-                dimension_needs_review = True
-                review_gaps.append(_unknown_signal_gap(signal_id, signal))
-                continue
-            scored_inputs.append(
-                (
-                    _directed_score(signal.probability, dimension.scoring_direction),
-                    signal.question_id,
-                    sorted(signal.evidence),
-                )
-            )
-
-        needs_review = needs_review or dimension_needs_review
-        if scored_inputs and dimension.weight > 0:
-            preference_contributions.append(
-                DecisionContribution(
-                    subject_id=dimension.id,
-                    score=sum(item[0] for item in scored_inputs) / len(scored_inputs),
-                    weight=dimension.weight,
-                    input_ids=sorted(item[1] for item in scored_inputs),
-                    job_evidence=sorted(
-                        evidence
-                        for item in scored_inputs
-                        for evidence in item[2]
-                    ),
-                )
-            )
-
-    qualification_contributions: list[DecisionContribution] = []
-    qualification_gaps: list[Gap] = []
-    hard_blockers: list[Gap] = []
-
-    for definition in sorted(rubric.facts, key=lambda item: item.id):
-        if not definition.requires_evidence:
-            continue
-        fact = facts_by_id.get(definition.id)
-        if fact is None or fact.is_unknown or not fact.evidence:
-            continue
-        if not _is_required(fact.value, definition):
-            continue
-
-        matching_claims = active_claims.get(definition.id, [])
-        if not matching_claims:
-            qualification_gaps.append(
-                Gap(
-                    kind=GapKind.EVIDENCE_GAP,
-                    subject_id=definition.id,
-                    message=f"Candidate evidence is missing for {definition.name}.",
-                    input_ids=[fact.fact_id],
-                    job_evidence=sorted(fact.evidence),
-                )
-            )
-            needs_review = True
-            continue
-
-        selected_claim = _select_claim(matching_claims)
-        candidate_evidence = _claim_evidence(selected_claim)
-        lacks_capability = _explicitly_false(selected_claim.value)
-        dimensions = [
-            dimension
-            for dimension in rubric.dimensions
-            if definition.id in dimension.fact_ids
-        ]
-        weight = sum(dimension.weight for dimension in dimensions) or 1.0
-        contribution = DecisionContribution(
-            subject_id=definition.id,
-            score=0.0 if lacks_capability else 1.0,
-            weight=weight,
-            input_ids=sorted([fact.fact_id, selected_claim.id]),
-            job_evidence=sorted(fact.evidence),
-            candidate_evidence=candidate_evidence,
-        )
-        qualification_contributions.append(contribution)
-
-        if not lacks_capability:
-            continue
-        is_hard_blocker = any(dimension.hard_constraint for dimension in dimensions)
-        gap = Gap(
-            kind=(GapKind.HARD_BLOCKER if is_hard_blocker else GapKind.CAPABILITY_GAP),
-            subject_id=definition.id,
-            message=f"Confirmed candidate evidence conflicts with {definition.name}.",
-            input_ids=contribution.input_ids,
-            job_evidence=contribution.job_evidence,
-            candidate_evidence=contribution.candidate_evidence,
-        )
-        (hard_blockers if is_hard_blocker else qualification_gaps).append(gap)
-
-    preference_score = _weighted_score(preference_contributions)
-    qualification_score = _weighted_score(qualification_contributions)
-
-    if hard_blockers:
-        gaps = _sorted_gaps(hard_blockers)
-        recommendation = RecommendationLevel.SKIP
+    if blockers:
+        recommendation, gaps = RecommendationLevel.SKIP, blockers
     else:
-        gaps = _sorted_gaps([*review_gaps, *qualification_gaps])
+        gaps = [*preference_gaps, *qualification_gaps]
         if any(gap.kind is GapKind.EVIDENCE_GAP for gap in gaps):
             recommendation = RecommendationLevel.APPLY_AFTER_REVIEW
-            needs_review = True
         else:
-            recommendation = _score_recommendation(
-                preference_score, qualification_score, rubric
-            )
-            needs_review = (
-                needs_review
-                or recommendation is RecommendationLevel.APPLY_AFTER_REVIEW
-            )
-            if recommendation is RecommendationLevel.SKIP:
-                evidence = sorted(
-                    item
-                    for contribution in preference_contributions
-                    for item in contribution.job_evidence
-                )
-                gaps.append(
-                    Gap(
-                        kind=GapKind.PREFERENCE_MISMATCH,
-                        subject_id="preference",
-                        message=(
-                            "The evidenced role preference score is below the hold "
-                            "threshold."
-                        ),
-                        input_ids=sorted(
-                            item
-                            for contribution in preference_contributions
-                            for item in contribution.input_ids
-                        ),
-                        job_evidence=evidence,
-                    )
-                )
-                gaps = _sorted_gaps(gaps)
+            recommendation = _recommend(preference_score, qualification_score, rubric)
+            if (
+                recommendation is RecommendationLevel.SKIP
+                and preference_score is not None
+                and qualification_score is not None
+                and preference_score < qualification_score
+            ):
+                gaps.append(_preference_gap(preference))
 
+    gaps = _sort_gaps(gaps)
     return DecisionResult(
         preference_score=preference_score,
         qualification_score=qualification_score,
         recommendation=recommendation,
         gaps=gaps,
-        preference_contributions=sorted(
-            preference_contributions, key=lambda item: item.subject_id
-        ),
-        qualification_contributions=sorted(
-            qualification_contributions, key=lambda item: item.subject_id
-        ),
+        preference_contributions=preference,
+        qualification_contributions=qualification,
         rubric_version=rubric.version,
-        needs_review=needs_review,
+        needs_review=(recommendation is RecommendationLevel.APPLY_AFTER_REVIEW),
     )
 
 
-def _unique_by_id(items: Iterable[Any], field: str, label: str) -> dict[str, Any]:
+def _normalize(
+    facts: list[ExtractedFact],
+    signals: list[DecisionSignal],
+    profile: CandidateProfile,
+    rubric: Rubric,
+) -> _Inputs:
+    _validate_rubric(rubric)
+    fact_inputs = _unique(facts, "fact_id", "fact")
+    signal_inputs = _unique(signals, "question_id", "signal")
+    _unique(profile.claims, "id", "candidate claim")
+    definitions = {item.id: item for item in rubric.facts}
+    questions = {item.id: item for item in rubric.questions}
+
+    normalized_facts = {
+        fact_id: _normalize_fact(definition, fact_inputs.get(fact_id))
+        for fact_id, definition in definitions.items()
+    }
+    normalized_signals = {
+        question_id: _normalize_signal(
+            question_id, question.version, signal_inputs.get(question_id)
+        )
+        for question_id, question in questions.items()
+    }
+    claims: dict[str, list[_Value]] = {}
+    for claim in sorted(profile.claims, key=lambda item: item.id):
+        if not claim.confirmed or claim.source not in _ACTIVE_SOURCES:
+            continue
+        if claim.claim_type not in definitions:
+            raise ValueError(f"candidate claim {claim.id} has unknown claim_type")
+        evidence = (claim.source_quote or claim.provenance,)
+        if evidence == (None,):
+            evidence = ()
+        value = _typed(definitions[claim.claim_type], claim.value, "candidate claim")
+        claims.setdefault(claim.claim_type, []).append(
+            _normalized_value(claim.id, value, evidence)
+        )
+    return _Inputs(
+        normalized_facts,
+        normalized_signals,
+        {key: tuple(value) for key, value in sorted(claims.items())},
+    )
+
+
+def _normalize_fact(definition: FactDefinition, fact: ExtractedFact | None) -> _Value:
+    if fact is None:
+        return _Value(definition.id, _UNRESOLVED, (), True)
+    evidence = tuple(sorted(fact.evidence))
+    if fact.is_unknown:
+        return _Value(fact.fact_id, _UNRESOLVED, evidence, not evidence)
+    value = _typed(definition, fact.value, "fact")
+    return _normalized_value(fact.fact_id, value, evidence)
+
+
+def _normalize_signal(question_id: str, version: str, signal: DecisionSignal | None) -> _Value:
+    if signal is None:
+        return _Value(question_id, _UNRESOLVED, (), True)
+    evidence = tuple(sorted(signal.evidence))
+    valid = (
+        signal.status is SignalStatus.AVAILABLE
+        and signal.question_version == version
+        and bool(evidence)
+    )
+    value = signal.probability if valid else _UNRESOLVED
+    return _Value(signal.question_id, value, evidence, not evidence)
+
+
+def _normalized_value(input_id: str, value: Any, evidence: tuple[str, ...]) -> _Value:
+    if _unknown(value) or not evidence:
+        value = _UNRESOLVED
+    return _Value(input_id, value, evidence, not evidence)
+
+
+def _typed(definition: FactDefinition, value: Any, source: str) -> Any:
+    label = f"{source} {definition.id}"
+    if definition.data_type is FactDataType.BOOLEAN:
+        if type(value) is not bool:
+            raise ValueError(f"{label} must be boolean")
+        return value
+    if definition.data_type is FactDataType.NUMBER:
+        if type(value) not in (int, float) or not math.isfinite(value):
+            raise ValueError(f"{label} must be a finite number")
+        if not 0 <= value <= 1:
+            raise ValueError(f"{label} must be between 0 and 1")
+        return float(value)
+    if definition.data_type in {FactDataType.TEXT, FactDataType.ENUM}:
+        if not isinstance(value, str):
+            raise ValueError(f"{label} must be text")
+        if definition.data_type is FactDataType.ENUM and value not in definition.enum_values:
+            raise ValueError(f"{label} must be in enum_values")
+        return value.strip()
+    if definition.data_type is FactDataType.LIST:
+        if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+            raise ValueError(f"{label} must be a list of text values")
+        return tuple(item.strip() for item in value)
+    raise ValueError(f"{label} has unsupported data type")
+
+
+def _unknown(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.casefold() in _UNKNOWN_VALUES
+    return (
+        isinstance(value, tuple)
+        and any(item.casefold() in _UNKNOWN_VALUES for item in value)
+    )
+
+
+def _preference(inputs: _Inputs, rubric: Rubric) -> tuple[list[DecisionContribution], list[Gap]]:
+    contributions: list[DecisionContribution] = []
+    gaps: list[Gap] = []
+    for dimension in sorted(rubric.dimensions, key=lambda item: item.id):
+        if dimension.weight == 0:
+            continue
+        values = [inputs.facts[item] for item in sorted(dimension.fact_ids)]
+        values += [inputs.signals[item] for item in sorted(dimension.signal_ids)]
+        unresolved = [value for value in values if not value.ready]
+        if unresolved:
+            gaps += [
+                _missing_gap(value.id, [value.id], value.evidence, value.missing_evidence)
+                for value in unresolved
+            ]
+            continue
+        scores = [_dimension_score(value.value, dimension) for value in values]
+        if not scores or any(score is None for score in scores):
+            gaps.append(_missing_gap(dimension.id, [value.id for value in values], _evidence(values)))
+            continue
+        score = sum(score for score in scores if score is not None) / len(scores)
+        if dimension.threshold is not None:
+            score = float(score >= dimension.threshold)  # Equality passes.
+        contributions.append(
+            DecisionContribution(
+                subject_id=dimension.id,
+                score=score,
+                weight=dimension.weight,
+                input_ids=sorted(value.id for value in values),
+                job_evidence=_evidence(values),
+            )
+        )
+    return contributions, _sort_gaps(gaps)
+
+
+def _dimension_score(value: Any, dimension: ValueDimension) -> float | None:
+    if type(value) in (bool, int, float):
+        score = float(value)
+    elif isinstance(value, (str, tuple)):
+        if not dimension.positive_keywords and not dimension.negative_keywords:
+            score = 1.0 if isinstance(value, tuple) else None
+        else:
+            text = value if isinstance(value, str) else " ".join(value)
+            positive = any(word.casefold() in text.casefold() for word in dimension.positive_keywords)
+            negative = any(word.casefold() in text.casefold() for word in dimension.negative_keywords)
+            score = None if positive == negative else float(positive)
+    else:
+        return None
+    if dimension.scoring_direction is ScoringDirection.LOWER_IS_BETTER:
+        return 1 - score
+    return score
+
+
+def _qualification(
+    inputs: _Inputs, rubric: Rubric
+) -> tuple[list[DecisionContribution], list[Gap], list[Gap]]:
+    contributions: list[DecisionContribution] = []
+    gaps: list[Gap] = []
+    blockers: list[Gap] = []
+    dimensions = [item for item in rubric.dimensions if item.weight > 0]
+    for definition in sorted(rubric.facts, key=lambda item: item.id):
+        if not definition.requires_evidence:
+            continue
+        fact = inputs.facts[definition.id]
+        if not fact.ready:
+            gaps.append(_missing_gap(definition.id, [definition.id], fact.evidence, fact.missing_evidence))
+            continue
+        claims = inputs.claims.get(definition.id, ())
+        conflicts = [item for item in claims if item.ready and not _compatible(fact.value, item.value)]
+        matches = [item for item in claims if item.ready and _compatible(fact.value, item.value)]
+        unresolved = [item for item in claims if not item.ready]
+        weight = sum(
+            item.weight for item in dimensions if definition.id in item.fact_ids
+        ) or 1.0
+        if conflicts:
+            claim = conflicts[0]
+            contribution = _qualification_contribution(definition.id, fact, claim, 0, weight)
+            contributions.append(contribution)
+            hard = any(item.hard_constraint and definition.id in item.fact_ids for item in dimensions)
+            gap = Gap(
+                kind=GapKind.HARD_BLOCKER if hard else GapKind.CAPABILITY_GAP,
+                subject_id=definition.id,
+                message=f"Confirmed candidate value conflicts with {definition.name}.",
+                input_ids=contribution.input_ids,
+                job_evidence=contribution.job_evidence,
+                candidate_evidence=contribution.candidate_evidence,
+            )
+            (blockers if hard else gaps).append(gap)
+        elif matches:
+            contributions.append(_qualification_contribution(definition.id, fact, matches[0], 1, weight))
+        else:
+            claim = unresolved[0] if unresolved else None
+            gaps.append(
+                _missing_gap(
+                    definition.id,
+                    [definition.id, *([claim.id] if claim else [])],
+                    fact.evidence,
+                    claim is None or claim.missing_evidence,
+                    claim.evidence if claim else (),
+                )
+            )
+    return contributions, _sort_gaps(gaps), _sort_gaps(blockers)
+
+
+def _compatible(required: Any, candidate: Any) -> bool:
+    if isinstance(required, tuple):
+        required_set = {item.casefold() for item in required}
+        candidate_set = {item.casefold() for item in candidate}
+        return bool(required_set & candidate_set) or (
+            not required_set and not candidate_set
+        )
+    if isinstance(required, str):
+        return required.casefold() == candidate.casefold()
+    return required == candidate
+
+
+def _qualification_contribution(
+    subject: str, fact: _Value, claim: _Value, score: float, weight: float
+) -> DecisionContribution:
+    return DecisionContribution(
+        subject_id=subject,
+        score=score,
+        weight=weight,
+        input_ids=sorted([fact.id, claim.id]),
+        job_evidence=list(fact.evidence),
+        candidate_evidence=list(claim.evidence),
+    )
+
+
+def _missing_gap(
+    subject: str,
+    input_ids: list[str],
+    job_evidence: Iterable[str],
+    missing: bool = False,
+    candidate_evidence: Iterable[str] = (),
+) -> Gap:
+    return Gap(
+        kind=GapKind.EVIDENCE_GAP,
+        subject_id=subject,
+        message=f"Evidence for {subject} requires review.",
+        input_ids=sorted(input_ids),
+        job_evidence=sorted(job_evidence),
+        candidate_evidence=sorted(candidate_evidence),
+        missing_evidence=missing,
+    )
+
+
+def _preference_gap(contributions: list[DecisionContribution]) -> Gap:
+    return Gap(
+        kind=GapKind.PREFERENCE_MISMATCH,
+        subject_id="preference",
+        message="The evidenced preference score is below the hold threshold.",
+        input_ids=sorted({value for item in contributions for value in item.input_ids}),
+        job_evidence=sorted({value for item in contributions for value in item.job_evidence}),
+    )
+
+
+def _evidence(values: Iterable[_Value]) -> list[str]:
+    return sorted({item for value in values for item in value.evidence})
+
+
+def _weighted(contributions: list[DecisionContribution]) -> float | None:
+    weight = sum(item.weight for item in contributions)
+    if not weight:
+        return None
+    return sum(item.score * item.weight for item in contributions) / weight
+
+
+def _recommend(
+    preference: float | None, qualification: float | None, rubric: Rubric
+) -> RecommendationLevel:
+    if preference is None or qualification is None:
+        return RecommendationLevel.APPLY_AFTER_REVIEW
+    score = min(preference, qualification)
+    for level in RecommendationLevel:
+        if score >= rubric.recommendation_thresholds[level]:
+            return level
+    raise ValueError("recommendation thresholds do not cover the score range")
+
+
+def _unique(items: Iterable[Any], field: str, label: str) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for item in items:
         item_id = getattr(item, field)
@@ -233,181 +387,11 @@ def _unique_by_id(items: Iterable[Any], field: str, label: str) -> dict[str, Any
     return result
 
 
-def _active_claims(claims: list[CandidateClaim]) -> dict[str, list[CandidateClaim]]:
-    result: dict[str, list[CandidateClaim]] = {}
-    for claim in sorted(claims, key=lambda item: item.id):
-        if claim.confirmed and claim.source in _ACTIVE_SOURCES:
-            result.setdefault(claim.claim_type, []).append(claim)
-    return result
-
-
-def _select_claim(claims: list[CandidateClaim]) -> CandidateClaim:
-    return sorted(
-        claims,
-        key=lambda claim: (
-            not _explicitly_false(claim.value),
-            claim.source.value,
-            claim.id,
-        ),
-    )[0]
-
-
-def _fact_score(
-    value: Any, definition: FactDefinition, dimension: ValueDimension
-) -> float | None:
-    if definition.data_type is FactDataType.BOOLEAN:
-        if type(value) is not bool:
-            raise ValueError(f"fact {definition.id} must be boolean")
-        raw_score = float(value)
-    elif definition.data_type is FactDataType.NUMBER:
-        if type(value) not in (int, float) or not math.isfinite(value):
-            raise ValueError(f"fact {definition.id} must be a finite number")
-        if not 0 <= value <= 1:
-            raise ValueError(f"fact {definition.id} number must be between 0 and 1")
-        raw_score = float(value)
-    elif definition.data_type in {FactDataType.TEXT, FactDataType.ENUM}:
-        if not isinstance(value, str):
-            raise ValueError(f"fact {definition.id} must be text")
-        raw_score = _keyword_score(value, dimension)
-    elif definition.data_type is FactDataType.LIST:
-        if not isinstance(value, list) or any(
-            not isinstance(item, str) for item in value
-        ):
-            raise ValueError(f"fact {definition.id} must be a list of text values")
-        raw_score = _keyword_score(" ".join(value), dimension)
-    else:
-        raise ValueError(f"unsupported fact data type {definition.data_type}")
-    if raw_score is None:
-        return None
-    return _directed_score(raw_score, dimension.scoring_direction)
-
-
-def _keyword_score(value: str, dimension: ValueDimension) -> float | None:
-    normalized = value.casefold()
-    positive = any(
-        keyword.casefold() in normalized for keyword in dimension.positive_keywords
-    )
-    negative = any(
-        keyword.casefold() in normalized for keyword in dimension.negative_keywords
-    )
-    if positive == negative:
-        return None
-    return 1.0 if positive else 0.0
-
-
-def _directed_score(value: float | None, direction: ScoringDirection) -> float:
-    if value is None or not math.isfinite(value) or not 0 <= value <= 1:
-        raise ValueError("score input must be a finite number between 0 and 1")
-    if direction is ScoringDirection.HIGHER_IS_BETTER:
-        return float(value)
-    return 1 - float(value)
-
-
-def _is_required(value: Any, definition: FactDefinition) -> bool:
-    if definition.data_type is FactDataType.BOOLEAN:
-        if type(value) is not bool:
-            raise ValueError(f"fact {definition.id} must be boolean")
-        return value
-    if value is None:
-        return False
-    if isinstance(value, str):
-        return value.strip().casefold() not in _FALSE_TEXT
-    if type(value) in (int, float):
-        if not math.isfinite(value):
-            raise ValueError(f"fact {definition.id} must be finite")
-        return value != 0
-    if isinstance(value, list):
-        return bool(value)
-    raise ValueError(f"fact {definition.id} has unsupported requirement value")
-
-
-def _explicitly_false(value: Any) -> bool:
-    if type(value) is bool:
-        return not value
-    if type(value) in (int, float):
-        if not math.isfinite(value):
-            raise ValueError("candidate numeric claim must be finite")
-        return value == 0
-    if isinstance(value, str):
-        return value.strip().casefold() in _FALSE_TEXT
-    if isinstance(value, list):
-        return not value
-    if value is None:
-        return True
-    raise ValueError("candidate claim has unsupported semantic type")
-
-
-def _claim_evidence(claim: CandidateClaim) -> list[str]:
-    evidence = claim.source_quote or claim.provenance
-    return [evidence or f"{claim.source.value}:{claim.id}"]
-
-
-def _unknown_fact_gap(
-    definition: FactDefinition, fact: ExtractedFact | None
-) -> Gap:
-    evidence = (
-        sorted(fact.evidence)
-        if fact and fact.evidence
-        else [f"fact:{definition.id}:unknown"]
-    )
-    return Gap(
-        kind=GapKind.EVIDENCE_GAP,
-        subject_id=definition.id,
-        message=f"Required job evidence is unresolved for {definition.name}.",
-        input_ids=[definition.id],
-        job_evidence=evidence,
-    )
-
-
-def _unknown_signal_gap(
-    signal_id: str, signal: DecisionSignal | None
-) -> Gap:
-    status = signal.status.value if signal else "missing"
-    evidence = (
-        sorted(signal.evidence)
-        if signal and signal.evidence
-        else [f"signal:{signal_id}:{status}"]
-    )
-    return Gap(
-        kind=GapKind.EVIDENCE_GAP,
-        subject_id=signal_id,
-        message=f"Decision signal {signal_id} requires review.",
-        input_ids=[signal_id],
-        job_evidence=evidence,
-    )
-
-
-def _weighted_score(contributions: list[DecisionContribution]) -> float | None:
-    total_weight = sum(item.weight for item in contributions)
-    if total_weight == 0:
-        return None
-    return sum(item.score * item.weight for item in contributions) / total_weight
-
-
-def _score_recommendation(
-    preference_score: float | None,
-    qualification_score: float | None,
-    rubric: Rubric,
-) -> RecommendationLevel:
-    if preference_score is None or qualification_score is None:
-        return RecommendationLevel.APPLY_AFTER_REVIEW
-    score = min(preference_score, qualification_score)
-    for level in (
-        RecommendationLevel.PRIORITY_APPLY,
-        RecommendationLevel.APPLY_AFTER_REVIEW,
-        RecommendationLevel.HOLD,
-        RecommendationLevel.SKIP,
-    ):
-        if score >= rubric.recommendation_thresholds[level]:
-            return level
-    raise ValueError("recommendation thresholds do not cover the score range")
-
-
-def _sorted_gaps(gaps: list[Gap]) -> list[Gap]:
+def _sort_gaps(gaps: list[Gap]) -> list[Gap]:
     unique = {
         (gap.kind.value, gap.subject_id, tuple(gap.input_ids)): gap for gap in gaps
     }
     return sorted(
         unique.values(),
-        key=lambda gap: (gap.kind.value, gap.subject_id, tuple(gap.input_ids)),
+        key=lambda gap: (gap.kind.value, gap.subject_id, gap.input_ids),
     )

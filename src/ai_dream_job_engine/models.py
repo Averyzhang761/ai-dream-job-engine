@@ -198,9 +198,10 @@ class Gap(DomainModel):
     kind: GapKind
     subject_id: str = Field(min_length=1)
     message: str = Field(min_length=1)
-    input_ids: list[str] = Field(default_factory=list)
+    input_ids: list[str] = Field(min_length=1)
     job_evidence: list[str] = Field(default_factory=list)
     candidate_evidence: list[str] = Field(default_factory=list)
+    missing_evidence: bool = False
 
 
 class DecisionContribution(DomainModel):
@@ -238,7 +239,11 @@ class DecisionResult(DomainModel):
         gaps_without_evidence = [
             gap.subject_id
             for gap in self.gaps
-            if not gap.job_evidence and not gap.candidate_evidence
+            if not gap.job_evidence
+            and not gap.candidate_evidence
+            and not (
+                gap.kind is GapKind.EVIDENCE_GAP and gap.missing_evidence
+            )
         ]
         if gaps_without_evidence:
             joined_ids = ", ".join(gaps_without_evidence)

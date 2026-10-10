@@ -305,6 +305,17 @@ def test_default_work_arrangement_has_no_preferred_mode() -> None:
     assert work_arrangement.negative_keywords == []
 
 
+def test_default_neutral_candidate_comparisons_use_lists() -> None:
+    rubric = load_default_rubric()
+    facts = {fact.id: fact for fact in rubric.facts}
+    dimensions = {dimension.id: dimension for dimension in rubric.dimensions}
+
+    assert facts["work_arrangement_terms"].data_type == "list"
+    assert facts["work_authorization_requirement"].data_type == "list"
+    assert dimensions["work_authorization"].positive_keywords == []
+    assert dimensions["work_authorization"].negative_keywords == []
+
+
 def test_infrastructure_balance_models_pure_infrastructure_consistently() -> None:
     rubric = load_default_rubric()
     infrastructure = next(

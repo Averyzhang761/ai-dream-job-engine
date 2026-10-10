@@ -104,6 +104,26 @@ def test_decision_result_requires_evidence_for_every_gap() -> None:
         )
 
 
+def test_evidence_gap_can_explicitly_record_absent_source_evidence() -> None:
+    result = DecisionResult(
+        recommendation=RecommendationLevel.APPLY_AFTER_REVIEW,
+        gaps=[
+            Gap(
+                kind="evidence_gap",
+                subject_id="python",
+                message="Python evidence is absent.",
+                input_ids=["python"],
+                missing_evidence=True,
+            )
+        ],
+        rubric_version="ai-job-v1",
+        needs_review=True,
+    )
+
+    assert result.gaps[0].job_evidence == []
+    assert result.gaps[0].missing_evidence is True
+
+
 @pytest.mark.parametrize("direction", ["higher_is_better", "lower_is_better"])
 def test_dimension_accepts_supported_scoring_directions(direction: str) -> None:
     dimension = ValueDimension(
