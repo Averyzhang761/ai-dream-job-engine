@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -51,6 +51,11 @@ class DataClass(StrEnum):
     PUBLIC_JOB_DATA = "public_job_data"
     SELECTED_CANDIDATE_CLAIMS = "selected_candidate_claims"
     RESTRICTED_PERSONAL_DATA = "restricted_personal_data"
+
+
+class ScoringDirection(StrEnum):
+    HIGHER_IS_BETTER = "higher_is_better"
+    LOWER_IS_BETTER = "lower_is_better"
 
 
 class CandidateClaim(DomainModel):
@@ -108,6 +113,7 @@ class ValueDimension(DomainModel):
     fact_ids: list[str] = Field(default_factory=list)
     signal_ids: list[str] = Field(default_factory=list)
     weight: float = Field(ge=0)
+    scoring_direction: ScoringDirection
     positive_keywords: list[str] = Field(default_factory=list)
     negative_keywords: list[str] = Field(default_factory=list)
     hard_constraint: bool = False
@@ -239,6 +245,7 @@ class AnalysisRecord(DomainModel):
     result: DecisionResult | None = None
     trace: DecisionTrace | None = None
     status: Literal["success", "failed"]
+    latency_ms: int = Field(ge=0)
     error: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -254,12 +261,22 @@ class AnalysisSummary(DomainModel):
 class EvaluationCase(DomainModel):
     id: str = Field(min_length=1)
     job_description: str = Field(min_length=1)
-    expected_recommendation: RecommendationLevel
-    actual_recommendation: RecommendationLevel | None = None
+    human_recommendation: RecommendationLevel
+    human_gap_labels: list[GapKind]
+    system_recommendation: RecommendationLevel | None = None
+    system_gap_labels: list[GapKind] | None = None
     notes: str | None = None
 
 
 class EvaluationReport(DomainModel):
     cases: list[EvaluationCase] = Field(default_factory=list)
-    agreement_rate: float = Field(ge=0, le=1)
+    recommendation_agreement: float = Field(ge=0, le=1)
+    blocker_precision: float | None = Field(ge=0, le=1)
+    gap_type_confusion_counts: dict[
+        GapKind, dict[GapKind, Annotated[int, Field(ge=0)]]
+    ]
+    unsupported_claim_count: int = Field(ge=0)
+    rerun_stability: float = Field(ge=0, le=1)
+    top_five_usefulness: float = Field(ge=0, le=1)
+    review_time_seconds: float = Field(ge=0)
     failure_case_ids: list[str] = Field(default_factory=list)

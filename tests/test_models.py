@@ -2,12 +2,16 @@ import pytest
 from pydantic import ValidationError
 
 from ai_dream_job_engine.models import (
+    AnalysisRecord,
     CandidateClaim,
     ClaimSource,
     DecisionResult,
     DecisionSignal,
+    EvaluationCase,
+    EvaluationReport,
     FactDefinition,
     Gap,
+    GapKind,
     RecommendationLevel,
     ValueDimension,
 )
@@ -42,6 +46,7 @@ def test_dimension_rejects_negative_weight() -> None:
             name="Applied AI depth",
             definition="How directly the role builds applied AI products.",
             weight=-0.1,
+            scoring_direction="higher_is_better",
         )
 
 
@@ -69,3 +74,87 @@ def test_decision_result_requires_evidence_for_every_gap() -> None:
             ],
             rubric_version="ai-job-v1",
         )
+
+
+@pytest.mark.parametrize("direction", ["higher_is_better", "lower_is_better"])
+def test_dimension_accepts_supported_scoring_directions(direction: str) -> None:
+    dimension = ValueDimension(
+        id="dimension-1",
+        name="Applied AI depth",
+        definition="How directly the role builds applied AI products.",
+        weight=1,
+        scoring_direction=direction,
+    )
+
+    assert dimension.scoring_direction == direction
+
+
+def test_dimension_rejects_unknown_scoring_direction() -> None:
+    with pytest.raises(ValidationError):
+        ValueDimension(
+            id="dimension-1",
+            name="Applied AI depth",
+            definition="How directly the role builds applied AI products.",
+            weight=1,
+            scoring_direction="sideways",
+        )
+
+
+def test_analysis_record_rejects_negative_latency_ms() -> None:
+    record = AnalysisRecord(
+        id="analysis-1",
+        input_hash="sha256:example",
+        status="success",
+        latency_ms=0,
+    )
+
+    assert record.latency_ms == 0
+
+    with pytest.raises(ValidationError):
+        AnalysisRecord(
+            id="analysis-1",
+            input_hash="sha256:example",
+            status="success",
+            latency_ms=-1,
+        )
+
+
+def test_evaluation_case_requires_human_labels_before_system_result() -> None:
+    assert EvaluationCase.model_fields["human_recommendation"].is_required()
+    assert EvaluationCase.model_fields["human_gap_labels"].is_required()
+
+    with pytest.raises(ValidationError):
+        EvaluationCase(
+            id="case-1",
+            job_description="Build an applied AI product.",
+            system_recommendation=RecommendationLevel.PRIORITY_APPLY,
+            system_gap_labels=[],
+        )
+
+
+def test_evaluation_report_carries_all_named_metrics() -> None:
+    report = EvaluationReport(
+        cases=[
+            EvaluationCase(
+                id="case-1",
+                job_description="Build an applied AI product.",
+                human_recommendation=RecommendationLevel.PRIORITY_APPLY,
+                human_gap_labels=[GapKind.EVIDENCE_GAP],
+                system_recommendation=RecommendationLevel.APPLY_AFTER_REVIEW,
+                system_gap_labels=[GapKind.EVIDENCE_GAP],
+            )
+        ],
+        recommendation_agreement=0.8,
+        blocker_precision=1.0,
+        gap_type_confusion_counts={
+            GapKind.EVIDENCE_GAP: {GapKind.EVIDENCE_GAP: 1}
+        },
+        unsupported_claim_count=0,
+        rerun_stability=1.0,
+        top_five_usefulness=0.8,
+        review_time_seconds=120,
+    )
+
+    assert report.recommendation_agreement == 0.8
+    assert report.unsupported_claim_count == 0
+    assert report.review_time_seconds == 120
