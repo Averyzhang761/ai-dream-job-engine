@@ -154,18 +154,18 @@
     },
     {
       "id": "infrastructure_balance",
-      "name": "Infrastructure balance",
-      "definition": "Whether infrastructure work supports a stated AI or product outcome rather than being the role's only scope.",
-      "examples": ["Operate model serving for a user-facing feature", "Build a general compute platform only"],
+      "name": "Pure infrastructure concentration",
+      "definition": "The degree to which the role is limited to general infrastructure without a stated applied AI or product outcome.",
+      "examples": ["Build a general compute platform only", "Operate model serving for a user-facing feature"],
       "fact_ids": ["infrastructure_scope"],
       "signal_ids": ["pure_infrastructure"],
       "weight": 0.75,
       "scoring_direction": "lower_is_better",
-      "positive_keywords": ["model serving", "AI platform", "product integration"],
-      "negative_keywords": ["pure infrastructure", "general platform only"],
+      "positive_keywords": ["pure infrastructure", "general platform only"],
+      "negative_keywords": ["model serving", "AI platform", "product integration"],
       "hard_constraint": false,
       "threshold": 0.5,
-      "explanation_template": "Infrastructure-balance evidence: {evidence}"
+      "explanation_template": "Pure-infrastructure evidence: {evidence}"
     },
     {
       "id": "work_arrangement",
@@ -176,8 +176,8 @@
       "signal_ids": [],
       "weight": 0.75,
       "scoring_direction": "higher_is_better",
-      "positive_keywords": ["remote", "hybrid", "flexible"],
-      "negative_keywords": ["onsite required", "frequent travel"],
+      "positive_keywords": [],
+      "negative_keywords": [],
       "hard_constraint": false,
       "threshold": null,
       "explanation_template": "Work-arrangement evidence: {evidence}"

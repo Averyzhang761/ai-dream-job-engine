@@ -2,27 +2,31 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from importlib.resources import files
+import json
+import math
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
 from ai_dream_job_engine.models import (
     DecisionQuestion,
+    FactDataType,
     FactDefinition,
+    RecommendationLevel,
     Rubric,
     RubricPatch,
     ValueDimension,
 )
 
 
-_DEFAULT_RUBRIC_PATH = Path(__file__).with_name("templates") / "ai_job_v1.json"
 _ModelT = TypeVar("_ModelT", bound=BaseModel)
 
 
 def load_default_rubric() -> Rubric:
     """Load and validate the bundled AI-job rubric."""
-    rubric = Rubric.model_validate_json(_DEFAULT_RUBRIC_PATH.read_text(encoding="utf-8"))
+    template = files("ai_dream_job_engine").joinpath("templates", "ai_job_v1.json")
+    rubric = Rubric.model_validate_json(template.read_text(encoding="utf-8"))
     _validate_rubric(rubric)
     return rubric
 
@@ -80,7 +84,12 @@ def _validate_rubric(rubric: Rubric) -> None:
 
     fact_ids = {fact.id for fact in rubric.facts}
     signal_ids = {question.id for question in rubric.questions}
+    for fact in rubric.facts:
+        _validate_fact_default(fact)
+
     for dimension in rubric.dimensions:
+        if not math.isfinite(dimension.weight):
+            raise ValueError(f"dimension {dimension.id} weight must be finite")
         _require_threshold(dimension.threshold, f"dimension {dimension.id}")
         for fact_id in dimension.fact_ids:
             if fact_id not in fact_ids:
@@ -93,8 +102,53 @@ def _validate_rubric(rubric: Rubric) -> None:
                     f"unknown signal reference {signal_id!r} in dimension {dimension.id!r}"
                 )
 
+    expected_levels = set(RecommendationLevel)
+    if set(rubric.recommendation_thresholds) != expected_levels:
+        raise ValueError("thresholds are required for all recommendation levels")
+
     for level, threshold in rubric.recommendation_thresholds.items():
         _require_threshold(threshold, f"recommendation {level.value}")
+
+    thresholds = rubric.recommendation_thresholds
+    if not (
+        thresholds[RecommendationLevel.PRIORITY_APPLY]
+        > thresholds[RecommendationLevel.APPLY_AFTER_REVIEW]
+        > thresholds[RecommendationLevel.HOLD]
+        > thresholds[RecommendationLevel.SKIP]
+    ):
+        raise ValueError(
+            "recommendation thresholds must satisfy priority_apply > "
+            "apply_after_review > hold > skip"
+        )
+
+
+def _validate_fact_default(fact: FactDefinition) -> None:
+    value = fact.default_value
+    if value is None:
+        return
+
+    try:
+        json.dumps(value, allow_nan=False)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            f"fact {fact.id} default_value must be JSON-compatible"
+        ) from error
+
+    valid_type = {
+        FactDataType.BOOLEAN: type(value) is bool,
+        FactDataType.NUMBER: (
+            type(value) in (int, float) and math.isfinite(value)
+        ),
+        FactDataType.TEXT: isinstance(value, str),
+        FactDataType.ENUM: isinstance(value, str),
+        FactDataType.LIST: isinstance(value, list),
+    }[fact.data_type]
+    if not valid_type:
+        raise ValueError(
+            f"fact {fact.id} default_value must match {fact.data_type.value}"
+        )
+    if fact.data_type is FactDataType.ENUM and value not in fact.enum_values:
+        raise ValueError(f"fact {fact.id} default_value must be in enum_values")
 
 
 def _require_unique_ids(label: str, items: list[BaseModel]) -> None:
