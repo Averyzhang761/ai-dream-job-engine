@@ -165,6 +165,61 @@ async def test_mcp_profile_claims_require_server_preview_and_per_claim_decisions
     assert any(item["confirmed"] for item in confirmed.structured_content["claims"])
 
 
+def test_profile_confirmation_persists_only_confirmed_mixed_decisions() -> None:
+    class FailOnceStore(MemoryStore):
+        fail_next_save = False
+
+        def save_profile(self, profile):
+            if self.fail_next_save:
+                self.fail_next_save = False
+                raise RuntimeError("/private/path API_KEY=secret")
+            super().save_profile(profile)
+
+    existing = CandidateClaim(
+        id="existing",
+        claim_type="existing_fact",
+        value="keep me",
+        source=ClaimSource.USER_CONFIRMED,
+        confirmed=True,
+        provenance="user confirmation",
+    )
+    initial = CandidateProfile(claims=[existing])
+    store = FailOnceStore(profile=initial)
+    application = LocalProfileApplication(store)
+    proposals = [
+        _resume_candidate("accept", "skill", "Python"),
+        _resume_candidate("edit", "location", "San Francisco"),
+        _resume_candidate("reject", "compensation", "rejected private value"),
+    ]
+    issued = application.review_profile_claims(proposals)
+    decisions = [
+        ClaimDecision(claim_id="accept", action="accept"),
+        ClaimDecision(claim_id="edit", action="edit", edited_value="Remote"),
+        ClaimDecision(claim_id="reject", action="reject"),
+    ]
+    store.fail_next_save = True
+
+    with pytest.raises(ApplicationError, match="storage_failure"):
+        application.confirm_profile_claims(issued.preview_id, decisions)
+    assert store.load_profile() == initial
+
+    application.confirm_profile_claims(issued.preview_id, decisions)
+    reloaded = store.load_profile()
+
+    assert reloaded is not None
+    assert {claim.value for claim in reloaded.claims} == {
+        "keep me",
+        "Python",
+        "Remote",
+    }
+    assert all(claim.confirmed for claim in reloaded.claims)
+    assert not {"accept", "edit", "reject"} & {
+        claim.id for claim in reloaded.claims
+    }
+    with pytest.raises(ApplicationError, match="profile_preview_invalid"):
+        application.confirm_profile_claims(issued.preview_id, decisions)
+
+
 def test_explicit_database_path_override_is_preserved(monkeypatch, tmp_path) -> None:
     configured = tmp_path / "custom" / "state.sqlite3"
     monkeypatch.setenv("AI_DREAM_JOB_DATA_PATH", str(configured))

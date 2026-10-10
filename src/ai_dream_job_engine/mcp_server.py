@@ -314,7 +314,18 @@ class LocalProfileApplication:
                     update={"claims": [*profile.claims, *issued.candidates]},
                     deep=True,
                 )
-                updated = confirm_claims(staged, decisions)
+                confirmed = confirm_claims(staged, decisions)
+                proposal_ids = {item.id for item in issued.candidates}
+                updated = confirmed.model_copy(
+                    update={
+                        "claims": [
+                            claim
+                            for claim in confirmed.claims
+                            if claim.id not in proposal_ids
+                        ]
+                    },
+                    deep=True,
+                )
             except ValueError:
                 raise ApplicationError(INVALID_CLAIM_DECISIONS) from None
             self._save_profile(updated)
