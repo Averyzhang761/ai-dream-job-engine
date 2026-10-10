@@ -1,1 +1,11 @@
 .worktrees/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.egg-info/
+dist/
+build/
+.env
+*.db
+*.sqlite3
