@@ -35,7 +35,10 @@ def apply_rubric_patch(rubric: Rubric, patch: RubricPatch) -> Rubric:
     """Return a validated rubric with declarative updates applied."""
     _validate_rubric(rubric)
 
-    facts = _apply_updates(rubric.facts, patch.fact_updates, FactDefinition)
+    facts = [
+        _normalize_fact_default(fact)
+        for fact in _apply_updates(rubric.facts, patch.fact_updates, FactDefinition)
+    ]
     dimensions = _apply_updates(
         rubric.dimensions, patch.dimension_updates, ValueDimension
     )
@@ -123,12 +126,16 @@ def _validate_rubric(rubric: Rubric) -> None:
 
 
 def _validate_fact_default(fact: FactDefinition) -> None:
+    _normalize_fact_default(fact)
+
+
+def _normalize_fact_default(fact: FactDefinition) -> FactDefinition:
     value = fact.default_value
     if value is None:
-        return
+        return fact
 
     try:
-        json.dumps(value, allow_nan=False)
+        value = json.loads(json.dumps(value, allow_nan=False))
     except (TypeError, ValueError) as error:
         raise ValueError(
             f"fact {fact.id} default_value must be JSON-compatible"
@@ -149,6 +156,7 @@ def _validate_fact_default(fact: FactDefinition) -> None:
         )
     if fact.data_type is FactDataType.ENUM and value not in fact.enum_values:
         raise ValueError(f"fact {fact.id} default_value must be in enum_values")
+    return fact.model_copy(update={"default_value": value})
 
 
 def _require_unique_ids(label: str, items: list[BaseModel]) -> None:

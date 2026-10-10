@@ -27,6 +27,11 @@ class CustomDefault:
     pass
 
 
+class CallableList(list[str]):
+    def __call__(self) -> str:
+        return "executed"
+
+
 def test_default_rubric_contains_ai_job_dimensions() -> None:
     rubric = load_default_rubric()
 
@@ -204,6 +209,28 @@ def test_patch_rejects_executable_or_custom_defaults(default_value: object) -> N
 
     with pytest.raises(ValueError, match="JSON-compatible"):
         apply_rubric_patch(rubric, patch)
+
+
+def test_patch_normalizes_callable_list_subclass_default() -> None:
+    rubric = load_default_rubric()
+    patch = RubricPatch(
+        fact_updates={
+            "role_family": {
+                "data_type": "list",
+                "missing_policy": "default",
+                "default_value": CallableList(["applied_ai"]),
+            }
+        }
+    )
+
+    updated = apply_rubric_patch(rubric, patch)
+    default_value = next(
+        fact.default_value for fact in updated.facts if fact.id == "role_family"
+    )
+
+    assert default_value == ["applied_ai"]
+    assert type(default_value) is list
+    assert not callable(default_value)
 
 
 @pytest.mark.parametrize(
