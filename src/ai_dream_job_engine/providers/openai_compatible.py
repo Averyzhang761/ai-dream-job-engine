@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import Any, Literal
 
 from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ai_dream_job_engine.evidence import build_evidence_chunks, validate_quote
-from ai_dream_job_engine.models import ExtractedFact, Rubric
+from ai_dream_job_engine.models import (
+    ExtractedFact,
+    FactDataType,
+    FactDefinition,
+    Rubric,
+)
 from ai_dream_job_engine.providers.base import ProviderError
 
 
@@ -52,14 +58,20 @@ class OpenAICompatibleProvider:
         self.model = model
         if client is not None:
             self.client = client
-        elif provider == "openrouter":
-            self.client = OpenAI(
-                api_key=api_key,
-                base_url="https://openrouter.ai/api/v1",
-                max_retries=0,
-            )
         else:
-            self.client = OpenAI(api_key=api_key, max_retries=0)
+            try:
+                if provider == "openrouter":
+                    self.client = OpenAI(
+                        api_key=api_key,
+                        base_url="https://openrouter.ai/api/v1",
+                        max_retries=0,
+                    )
+                else:
+                    self.client = OpenAI(api_key=api_key, max_retries=0)
+            except Exception:
+                raise ProviderError(
+                    "provider client initialization failed"
+                ) from None
 
     def __repr__(self) -> str:
         return (
@@ -95,24 +107,24 @@ class OpenAICompatibleProvider:
                 text_format=_ExtractionResponse,
                 store=False,
             )
-            parsed = self._parse_response(response)
-            return self._validated_facts(parsed, job_description, rubric)
-        except ProviderError:
-            raise
         except Exception:
             raise ProviderError("job fact provider request failed") from None
+        parsed = self._parse_response(response)
+        return self._validated_facts(parsed, job_description, rubric)
 
     @staticmethod
     def _parse_response(response: Any) -> _ExtractionResponse:
-        raw = getattr(response, "output_parsed", None)
-        if raw is None:
-            raw = getattr(response, "output_text", None)
         try:
+            raw = getattr(response, "output_parsed", None)
+            if raw is None:
+                raw = getattr(response, "output_text", None)
             if isinstance(raw, str):
                 return _ExtractionResponse.model_validate_json(raw)
             return _ExtractionResponse.model_validate(raw)
-        except (ValidationError, ValueError, TypeError):
-            raise ProviderError("provider returned malformed structured output") from None
+        except Exception:
+            raise ProviderError(
+                "provider returned malformed structured output"
+            ) from None
 
     def _validated_facts(
         self,
@@ -121,12 +133,30 @@ class OpenAICompatibleProvider:
         rubric: Rubric,
     ) -> list[ExtractedFact]:
         definitions = {fact.id: fact for fact in rubric.facts}
+        if len(definitions) != len(rubric.facts):
+            raise ProviderError("provider fact definitions are not unique")
+
+        returned_ids = [fact.fact_id for fact in response.facts]
+        unknown_ids = set(returned_ids) - definitions.keys()
+        if unknown_ids:
+            raise ProviderError("provider returned an unknown fact")
+        if len(returned_ids) != len(set(returned_ids)) or set(returned_ids) != set(
+            definitions
+        ):
+            raise ProviderError("provider returned an invalid fact set")
+
+        returned_by_id = {fact.fact_id: fact for fact in response.facts}
         document = build_evidence_chunks(job_description)
         facts = []
-        for returned in response.facts:
-            definition = definitions.get(returned.fact_id)
-            if definition is None:
-                raise ProviderError("provider returned an unknown fact")
+        for definition in rubric.facts:
+            returned = returned_by_id[definition.id]
+            if returned.is_unknown:
+                if returned.value is not None or returned.evidence:
+                    raise ProviderError(
+                        "provider returned a contradictory unknown fact"
+                    )
+            elif not self._valid_fact_value(definition, returned.value):
+                raise ProviderError("provider returned an invalid fact value")
             if (
                 definition.requires_evidence
                 and not returned.is_unknown
@@ -149,3 +179,19 @@ class OpenAICompatibleProvider:
             except (ValueError, ValidationError):
                 raise ProviderError("provider returned invalid evidence") from None
         return facts
+
+    @staticmethod
+    def _valid_fact_value(definition: FactDefinition, value: Any) -> bool:
+        if definition.data_type is FactDataType.BOOLEAN:
+            return type(value) is bool
+        if definition.data_type is FactDataType.NUMBER:
+            if type(value) is int:
+                return True
+            return type(value) is float and math.isfinite(value)
+        if definition.data_type is FactDataType.TEXT:
+            return type(value) is str
+        if definition.data_type is FactDataType.ENUM:
+            return type(value) is str and value in definition.enum_values
+        if definition.data_type is FactDataType.LIST:
+            return type(value) is list
+        return False

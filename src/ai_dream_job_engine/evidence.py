@@ -38,6 +38,10 @@ def validate_quote(document: EvidenceDocument, quote: str) -> EvidenceRef:
     )
     if chunk is None:
         raise ValueError("evidence quote is not covered by a source chunk")
+    relative_start = start - chunk.start_offset
+    relative_end = end - chunk.start_offset
+    if chunk.text[relative_start:relative_end] != quote:
+        raise ValueError("evidence quote does not match the selected chunk")
     return EvidenceRef(
         chunk_id=chunk.id,
         quote=quote,

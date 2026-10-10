@@ -186,7 +186,7 @@ class Rubric(DomainModel):
 
 class EvidenceChunk(DomainModel):
     id: str = Field(min_length=1)
-    text: str
+    text: str = Field(min_length=1)
     start_offset: int = Field(ge=0)
     end_offset: int = Field(ge=0)
 
@@ -200,6 +200,30 @@ class EvidenceChunk(DomainModel):
 class EvidenceDocument(DomainModel):
     text: str
     chunks: list[EvidenceChunk]
+
+    @model_validator(mode="after")
+    def chunks_are_a_lossless_partition(self) -> EvidenceDocument:
+        if not self.text:
+            if self.chunks:
+                raise ValueError("empty evidence documents cannot have chunks")
+            return self
+        if not self.chunks:
+            raise ValueError("evidence chunks must cover the document")
+
+        seen_ids: set[str] = set()
+        next_offset = 0
+        for chunk in self.chunks:
+            if chunk.id in seen_ids:
+                raise ValueError("evidence chunk IDs must be unique")
+            if chunk.start_offset != next_offset or chunk.end_offset > len(self.text):
+                raise ValueError("evidence chunks must be ordered and contiguous")
+            if self.text[chunk.start_offset : chunk.end_offset] != chunk.text:
+                raise ValueError("evidence chunk text must match the document slice")
+            seen_ids.add(chunk.id)
+            next_offset = chunk.end_offset
+        if next_offset != len(self.text):
+            raise ValueError("evidence chunks must cover the document")
+        return self
 
 
 class EvidenceRef(DomainModel):

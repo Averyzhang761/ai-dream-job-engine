@@ -4,10 +4,15 @@ from typing import Any
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
+import ai_dream_job_engine.providers.jev as jev_module
+import ai_dream_job_engine.providers.openai_compatible as openai_module
 from ai_dream_job_engine.evidence import build_evidence_chunks, validate_quote
 from ai_dream_job_engine.models import (
     DecisionQuestion,
+    EvidenceChunk,
+    EvidenceDocument,
     FactDefinition,
     Rubric,
     SignalStatus,
@@ -32,6 +37,41 @@ class FakeResponses:
 class FakeOpenAIClient:
     def __init__(self, output: Any) -> None:
         self.responses = FakeResponses(output)
+
+
+class RaisingResponses:
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+
+    def parse(self, **_: Any) -> Any:
+        raise self.error
+
+
+class RaisingOpenAIClient:
+    def __init__(self, error: BaseException) -> None:
+        self.responses = RaisingResponses(error)
+
+
+class RaisingHttpClient:
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+
+    def post(self, *_: Any, **__: Any) -> Any:
+        raise self.error
+
+
+class BrokenParsedResponse:
+    @property
+    def output_parsed(self) -> Any:
+        raise RuntimeError("SECRET_KEY JD SECRET")
+
+
+class BrokenDecoderClient:
+    class Responses:
+        def parse(self, **_: Any) -> BrokenParsedResponse:
+            return BrokenParsedResponse()
+
+    responses = Responses()
 
 
 def rubric() -> Rubric:
@@ -62,6 +102,15 @@ def questions() -> list[DecisionQuestion]:
             question="Is this role product-facing?",
         ),
     ]
+
+
+def provider_with_output(output: Any) -> OpenAICompatibleProvider:
+    return OpenAICompatibleProvider(
+        provider="openai",
+        api_key="test-key",
+        model="test-model",
+        client=FakeOpenAIClient(output),
+    )
 
 
 def test_openai_direct_uses_official_base_url() -> None:
@@ -144,6 +193,80 @@ def test_provider_returns_validated_job_facts() -> None:
     assert facts[0].model == "test-model"
 
 
+@pytest.mark.parametrize(
+    ("data_type", "value", "enum_values"),
+    [
+        ("boolean", "yes", []),
+        ("number", True, []),
+        ("number", float("nan"), []),
+        ("number", float("inf"), []),
+        ("text", {"private": "shape"}, []),
+        ("enum", "hybrid", ["remote", "onsite"]),
+        ("list", "remote", []),
+    ],
+)
+def test_job_fact_values_are_strictly_validated(
+    data_type: str, value: Any, enum_values: list[str]
+) -> None:
+    definition = FactDefinition(
+        id="fact",
+        name="Fact",
+        definition="A strictly typed fact.",
+        data_type=data_type,
+        extraction_instructions="Extract the fact.",
+        enum_values=enum_values,
+    )
+    result = {
+        "facts": [
+            {
+                "fact_id": "fact",
+                "value": value,
+                "evidence": ["Remote"],
+            }
+        ]
+    }
+
+    with pytest.raises(ProviderError, match="invalid fact value"):
+        provider_with_output(result).extract(
+            "Remote", Rubric(version="v1", facts=[definition])
+        )
+
+
+@pytest.mark.parametrize(
+    "facts",
+    [
+        [],
+        [
+            {"fact_id": "location", "value": "Remote", "evidence": ["Remote"]},
+            {"fact_id": "location", "value": "Remote", "evidence": ["Remote"]},
+        ],
+    ],
+)
+def test_job_fact_set_must_be_complete_and_unique(facts: list[dict[str, Any]]) -> None:
+    with pytest.raises(ProviderError, match="fact set"):
+        provider_with_output({"facts": facts}).extract("Remote", rubric())
+
+
+@pytest.mark.parametrize(
+    "contradiction",
+    [
+        {"value": "Remote", "evidence": []},
+        {"value": None, "evidence": ["Remote"]},
+    ],
+)
+def test_unknown_job_fact_cannot_have_value_or_evidence(
+    contradiction: dict[str, Any],
+) -> None:
+    output = {
+        "facts": [
+            {"fact_id": "location", "is_unknown": True, **contradiction}
+        ]
+    }
+
+    with pytest.raises(ProviderError, match="unknown fact"):
+        provider_with_output(output).extract("Remote", rubric())
+
+
 def test_quote_not_in_jd_is_rejected() -> None:
     document = build_evidence_chunks("This role is Remote.")
     reference = validate_quote(document, "Remote")
@@ -178,6 +301,50 @@ def test_quote_not_in_jd_is_rejected() -> None:
 
     with pytest.raises(ProviderError, match="evidence"):
         provider.extract("This role is Remote.", rubric())
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        [
+            EvidenceChunk(id="same", text="abc", start_offset=0, end_offset=3),
+            EvidenceChunk(id="same", text="def", start_offset=3, end_offset=6),
+        ],
+        [EvidenceChunk(id="wrong", text="xxxxxx", start_offset=0, end_offset=6)],
+        [EvidenceChunk(id="gap", text="def", start_offset=3, end_offset=6)],
+        [
+            EvidenceChunk(id="one", text="abcd", start_offset=0, end_offset=4),
+            EvidenceChunk(id="two", text="def", start_offset=3, end_offset=6),
+        ],
+    ],
+)
+def test_evidence_document_rejects_invalid_chunk_layout(
+    chunks: list[EvidenceChunk],
+) -> None:
+    with pytest.raises(ValidationError):
+        EvidenceDocument(text="abcdef", chunks=chunks)
+
+
+def test_evidence_chunk_rejects_empty_span() -> None:
+    with pytest.raises(ValidationError):
+        EvidenceChunk(id="empty", text="", start_offset=0, end_offset=0)
+
+
+def test_validate_quote_checks_the_selected_chunk_text() -> None:
+    document = EvidenceDocument.model_construct(
+        text="secret Remote text",
+        chunks=[
+            EvidenceChunk(
+                id="wrong",
+                text="x" * 18,
+                start_offset=0,
+                end_offset=18,
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="chunk"):
+        validate_quote(document, "Remote")
 
 
 def test_malformed_structured_output_raises_provider_error() -> None:
@@ -226,8 +393,16 @@ def test_jev_maps_noul_probability() -> None:
             200,
             json={
                 "answers": [
-                    {"question_id": "applied_ai", "noul": 0.82},
-                    {"question_id": "product_facing", "noul": 0.67},
+                    {
+                        "question_id": "product_facing",
+                        "question_version": "question-v2",
+                        "noul": 0.67,
+                    },
+                    {
+                        "question_id": "applied_ai",
+                        "question_version": "question-v1",
+                        "noul": 0.82,
+                    },
                 ]
             },
         )
@@ -249,8 +424,10 @@ def test_jev_missing_answer_returns_invalid_signal() -> None:
             200,
             json={
                 "answers": [
-                    {"question_id": "applied_ai", "noul": "NaN"},
-                    {"question_id": "unknown", "noul": 2},
+                    {
+                        "question_id": "applied_ai",
+                        "question_version": "question-v1",
+                    },
                 ]
             },
         )
@@ -265,6 +442,152 @@ def test_jev_missing_answer_returns_invalid_signal() -> None:
         SignalStatus.INVALID,
     ]
     assert [signal.probability for signal in signals] == [None, None]
+
+
+def test_jev_rejects_duplicate_input_ids_before_request() -> None:
+    calls = 0
+
+    def respond(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json={"answers": []})
+
+    duplicate_questions = [
+        DecisionQuestion(id="same", version="v1", question="First?"),
+        DecisionQuestion(id="same", version="v2", question="Second?"),
+    ]
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(ProviderError, match="duplicate question ID"):
+            JevSignalProvider(api_key="test-key", client=client).judge(
+                "Public JD", duplicate_questions
+            )
+
+    assert calls == 0
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"question_id": "unknown", "question_version": "v1", "noul": 0.5},
+        {
+            "question_id": "applied_ai",
+            "question_version": "wrong",
+            "noul": 0.5,
+        },
+        {
+            "question_id": "applied_ai",
+            "question_version": "question-v1",
+            "noul": 0.5,
+            "extra": "not allowed",
+        },
+    ],
+)
+def test_jev_rejects_unbound_or_malformed_answers(answer: dict[str, Any]) -> None:
+    def respond(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"answers": [answer]})
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(ProviderError, match="invalid response"):
+            JevSignalProvider(api_key="test-key", client=client).judge(
+                "Public JD", questions()
+            )
+
+
+def test_jev_rejects_duplicate_returned_answers() -> None:
+    answer = {
+        "question_id": "applied_ai",
+        "question_version": "question-v1",
+        "noul": 0.5,
+    }
+
+    def respond(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"answers": [answer, answer]})
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(ProviderError, match="invalid response"):
+            JevSignalProvider(api_key="test-key", client=client).judge(
+                "Public JD", questions()
+            )
+
+
+def test_provider_client_exceptions_are_redacted() -> None:
+    leaked = "SECRET_KEY JD SECRET"
+    openai_provider = OpenAICompatibleProvider(
+        provider="openai",
+        api_key="test-key",
+        model="test-model",
+        client=RaisingOpenAIClient(RuntimeError(leaked)),
+    )
+
+    with pytest.raises(ProviderError) as openai_error:
+        openai_provider.extract("JD SECRET", rubric())
+    assert str(openai_error.value) == "job fact provider request failed"
+    assert leaked not in repr(openai_error.value)
+
+    decoding_provider = OpenAICompatibleProvider(
+        provider="openai",
+        api_key="test-key",
+        model="test-model",
+        client=BrokenDecoderClient(),
+    )
+    with pytest.raises(ProviderError) as decoding_error:
+        decoding_provider.extract("JD SECRET", rubric())
+    assert str(decoding_error.value) == "provider returned malformed structured output"
+    assert leaked not in repr(decoding_error.value)
+
+    with pytest.raises(ProviderError) as jev_error:
+        JevSignalProvider(
+            api_key="SECRET_KEY",
+            client=RaisingHttpClient(RuntimeError(leaked)),  # type: ignore[arg-type]
+        ).judge("JD SECRET", questions())
+    assert str(jev_error.value) == "JEV provider request failed"
+    assert leaked not in repr(jev_error.value)
+
+
+def test_provider_client_initialization_exceptions_are_redacted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leaked = "SECRET_KEY"
+
+    def fail_client(**_: Any) -> Any:
+        raise RuntimeError(leaked)
+
+    monkeypatch.setattr(openai_module, "OpenAI", fail_client)
+    with pytest.raises(ProviderError) as openai_error:
+        OpenAICompatibleProvider(
+            provider="openai", api_key=leaked, model="test-model"
+        )
+    assert str(openai_error.value) == "provider client initialization failed"
+    assert leaked not in repr(openai_error.value)
+
+    monkeypatch.setattr(jev_module.httpx, "Client", fail_client)
+    with pytest.raises(ProviderError) as jev_error:
+        JevSignalProvider(api_key=leaked)
+    assert str(jev_error.value) == "JEV client initialization failed"
+    assert leaked not in repr(jev_error.value)
+
+
+@pytest.mark.parametrize(
+    "control_error", [KeyboardInterrupt(), SystemExit(), GeneratorExit()]
+)
+def test_provider_process_control_exceptions_escape(
+    control_error: BaseException,
+) -> None:
+    provider = OpenAICompatibleProvider(
+        provider="openai",
+        api_key="test-key",
+        model="test-model",
+        client=RaisingOpenAIClient(control_error),
+    )
+
+    with pytest.raises(type(control_error)):
+        provider.extract("Public JD", rubric())
+
+    with pytest.raises(type(control_error)):
+        JevSignalProvider(
+            api_key="test-key",
+            client=RaisingHttpClient(control_error),  # type: ignore[arg-type]
+        ).judge("Public JD", questions())
 
 
 def test_missing_api_key_fails_before_network_call(
