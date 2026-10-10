@@ -359,8 +359,10 @@ class DecisionTrace(DomainModel):
     input_ids: list[str] = Field(default_factory=list)
     evidence: list[str] = Field(default_factory=list)
     providers: dict[str, str] = Field(default_factory=dict)
+    model_versions: dict[str, str] = Field(default_factory=dict)
     rubric_version: str = Field(min_length=1)
     prompt_versions: dict[str, str] = Field(default_factory=dict)
+    question_versions: dict[str, str] = Field(default_factory=dict)
     result_version: str = Field(min_length=1)
     outbound_data_classes: list[DataClass] = Field(default_factory=list)
 
@@ -374,6 +376,7 @@ class AnalysisRecord(DomainModel):
     trace: DecisionTrace | None = None
     status: Literal["success", "failed"]
     latency_ms: int = Field(ge=0)
+    error_category: str | None = None
     error: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
