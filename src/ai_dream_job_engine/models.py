@@ -216,6 +216,15 @@ class ClaimDecision(DomainModel):
     action: Literal["accept", "edit", "reject"]
     edited_value: Any | None = None
 
+    @model_validator(mode="after")
+    def edited_value_matches_action(self) -> ClaimDecision:
+        supplied = "edited_value" in self.model_fields_set
+        if self.action == "edit" and not supplied:
+            raise ValueError("edited_value must be supplied for edit")
+        if self.action != "edit" and supplied:
+            raise ValueError("edited_value is only allowed for edit")
+        return self
+
 
 class MemoryImportPreview(DomainModel):
     source_agent: str = Field(min_length=1)

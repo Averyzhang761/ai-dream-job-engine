@@ -4,6 +4,7 @@ from pydantic import ValidationError
 from ai_dream_job_engine.models import (
     AnalysisRecord,
     CandidateClaim,
+    ClaimDecision,
     ClaimSource,
     DecisionResult,
     DecisionSignal,
@@ -26,6 +27,33 @@ def test_agent_suggested_claim_requires_confirmation() -> None:
             source=ClaimSource.AGENT_SUGGESTED,
             confirmed=True,
         )
+
+
+@pytest.mark.parametrize(
+    ("action", "edited_value"),
+    [
+        ("accept", None),
+        ("accept", "ignored"),
+        ("reject", None),
+        ("reject", "ignored"),
+    ],
+)
+def test_claim_decision_forbids_edited_value_without_edit(
+    action: str, edited_value: object
+) -> None:
+    with pytest.raises(ValidationError, match="edited_value"):
+        ClaimDecision(
+            claim_id="claim-1", action=action, edited_value=edited_value
+        )
+
+
+def test_claim_decision_edit_requires_explicit_value() -> None:
+    with pytest.raises(ValidationError, match="edited_value"):
+        ClaimDecision(claim_id="claim-1", action="edit")
+
+    decision = ClaimDecision(claim_id="claim-1", action="edit", edited_value=None)
+
+    assert "edited_value" in decision.model_fields_set
 
 
 def test_fact_definition_rejects_unknown_type() -> None:
