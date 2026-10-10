@@ -174,72 +174,6 @@ class _PersistedRecordSafety:
             raise ValueError("trace input refs incomplete")
         return record
 
-    def validate_stored(self, record: AnalysisRecord) -> None:
-        _validate_stored_record(record)
-        trace = record.trace
-        result = record.result
-        if record.status != "success" or trace is None or result is None:
-            raise ValueError("stored analysis is not successful")
-        fact_ids = [item.fact_id for item in record.facts]
-        signal_keys = [
-            (item.question_id, item.question_version) for item in record.signals
-        ]
-        if len(fact_ids) != len(set(fact_ids)):
-            raise ValueError("stored facts are duplicated")
-        if len(signal_keys) != len(set(signal_keys)):
-            raise ValueError("stored signals are duplicated")
-        result_input_ids = {
-            input_id
-            for item in (
-                result.preference_contributions
-                + result.qualification_contributions
-                + result.gaps
-            )
-            for input_id in item.input_ids
-        }
-        stored_input_ids = set(fact_ids) | set(trace.question_versions) | result_input_ids
-        traced_input_ids = {
-            item
-            for item in trace.input_ids
-            if not item.startswith("profile-ref:v1:")
-        }
-        if (
-            not set(trace.question_versions).issubset(traced_input_ids)
-            or not traced_input_ids.issubset(stored_input_ids)
-        ):
-            raise ValueError("stored trace inputs are incomplete")
-        expected_stages = {
-            *({"facts"} if record.facts else set()),
-            *({"signals"} if record.signals else set()),
-        }
-        for versions in (
-            trace.providers,
-            trace.model_versions,
-            trace.prompt_versions,
-        ):
-            if set(versions) != expected_stages or any(
-                not item for item in versions.values()
-            ):
-                raise ValueError("stored stage metadata is incomplete")
-        if result.model_versions != trace.model_versions:
-            raise ValueError("stored model versions mismatch")
-        if trace.result_version != result.result_version:
-            raise ValueError("stored result version mismatch")
-        if result.rubric_version != trace.rubric_version:
-            raise ValueError("stored rubric versions mismatch")
-        if record.facts and (
-            {item.provider for item in record.facts} != {trace.providers["facts"]}
-            or {item.model for item in record.facts}
-            != {trace.model_versions["facts"]}
-        ):
-            raise ValueError("stored fact metadata mismatch")
-        if record.signals and (
-            {item.provider for item in record.signals}
-            != {trace.providers["signals"]}
-            or {item.model for item in record.signals}
-            != {trace.model_versions["signals"]}
-        ):
-            raise ValueError("stored signal metadata mismatch")
     def _complete(
         self,
         facts: list[ExtractedFact],
@@ -275,19 +209,6 @@ class _PersistedRecordSafety:
         result = record.result
         if trace is None or result is None:
             raise ValueError("versions missing")
-        expected_stages = {
-            *({"facts"} if record.facts else set()),
-            *({"signals"} if record.signals else set()),
-        }
-        for versions in (
-            trace.providers,
-            trace.model_versions,
-            trace.prompt_versions,
-        ):
-            if set(versions) != expected_stages or any(
-                not item for item in versions.values()
-            ):
-                raise ValueError("stage metadata incomplete")
         surface = _decision_surface(self.profile, self.rubric)
         if trace.question_versions != surface.question_versions:
             raise ValueError("question versions incomplete")
@@ -295,10 +216,6 @@ class _PersistedRecordSafety:
             raise ValueError("trace rubric stale")
         if result.rubric_version != self.rubric.version:
             raise ValueError("result rubric stale")
-        if trace.result_version != result.result_version:
-            raise ValueError("result version mismatch")
-        if result.model_versions != trace.model_versions:
-            raise ValueError("model versions mismatch")
 
     def _jd_ref(self, start: int, end: int, value: str) -> str:
         ref = (
@@ -432,6 +349,7 @@ class JobAnalysisService:
                 "analysis_not_successful",
                 "Analysis cannot be recomputed; choose a successful analysis ID.",
             )
+        _validate_stored_record_or_raise(existing)
         profile, rubric = self._active_inputs()
         safety = _PersistedRecordSafety(
             existing.input_hash, rubric, profile, None
@@ -444,7 +362,6 @@ class JobAnalysisService:
         }
         failed = False
         try:
-            safety.validate_stored(existing)
             result = _decision(
                 existing.facts,
                 existing.signals,
@@ -501,13 +418,7 @@ class JobAnalysisService:
                 "trace_unavailable",
                 "Decision trace is unavailable; choose a successful analysis ID.",
             )
-        failed = False
-        try:
-            _validate_stored_record(record)
-        except Exception:
-            failed = True
-        if failed:
-            raise AnalysisServiceError(_TRACE_CATEGORY, _TRACE_MESSAGE) from None
+        _validate_stored_record_or_raise(record)
         return record.trace
 
     def list_analyzed_jobs(self) -> list[AnalysisSummary]:
@@ -749,6 +660,7 @@ def _validate_stored_record(record: AnalysisRecord) -> None:
         record.status != "success"
         or result is None
         or record.input_length is None
+        or record.input_length <= 0
     ):
         raise ValueError("stored success metadata is incomplete")
     _parse_analysis_id(trace.analysis_id)
@@ -756,6 +668,81 @@ def _validate_stored_record(record: AnalysisRecord) -> None:
         raise ValueError("stored trace identity mismatch")
     if trace.outbound_data_classes != [DataClass.PUBLIC_JOB_DATA]:
         raise ValueError("stored trace has unsafe outbound data")
+
+    fact_ids = [item.fact_id for item in record.facts]
+    signal_keys = [
+        (item.question_id, item.question_version) for item in record.signals
+    ]
+    if len(fact_ids) != len(set(fact_ids)):
+        raise ValueError("stored facts are duplicated")
+    if len(signal_keys) != len(set(signal_keys)):
+        raise ValueError("stored signals are duplicated")
+
+    result_items = (
+        result.preference_contributions
+        + result.qualification_contributions
+        + result.gaps
+    )
+    result_input_ids = {
+        input_id for item in result_items for input_id in item.input_ids
+    }
+    traced_input_ids = set(trace.input_ids)
+    if trace.input_ids != sorted(traced_input_ids):
+        raise ValueError("stored trace inputs are not canonical")
+    traced_profile_ids = {
+        item for item in traced_input_ids if _PROFILE_REF_PATTERN.fullmatch(item)
+    }
+    traced_non_profile_ids = traced_input_ids - traced_profile_ids
+    stored_non_profile_ids = (
+        set(fact_ids)
+        | {item.question_id for item in record.signals}
+        | set(trace.question_versions)
+        | {item for item in result_input_ids if item not in traced_profile_ids}
+    )
+    if (
+        not set(trace.question_versions).issubset(traced_non_profile_ids)
+        or not result_input_ids.issubset(traced_input_ids)
+        or not traced_non_profile_ids.issubset(stored_non_profile_ids)
+    ):
+        raise ValueError("stored trace inputs are unbound")
+
+    expected_stages = {
+        *({"facts"} if record.facts else set()),
+        *({"signals"} if record.signals else set()),
+    }
+    for versions in (
+        trace.providers,
+        trace.model_versions,
+        trace.prompt_versions,
+    ):
+        if set(versions) != expected_stages or any(
+            not item for item in versions.values()
+        ):
+            raise ValueError("stored stage metadata is incomplete")
+    if result.model_versions != trace.model_versions:
+        raise ValueError("stored model versions mismatch")
+    if trace.result_version != result.result_version:
+        raise ValueError("stored result version mismatch")
+    if result.rubric_version != trace.rubric_version:
+        raise ValueError("stored rubric versions mismatch")
+    expected_prompt_version = ";".join(
+        f"{key}:{value}" for key, value in sorted(trace.prompt_versions.items())
+    )
+    if result.prompt_version != expected_prompt_version:
+        raise ValueError("stored prompt versions mismatch")
+    if record.facts and (
+        {item.provider for item in record.facts} != {trace.providers["facts"]}
+        or {item.model for item in record.facts}
+        != {trace.model_versions["facts"]}
+    ):
+        raise ValueError("stored fact metadata mismatch")
+    if record.signals and (
+        {item.provider for item in record.signals}
+        != {trace.providers["signals"]}
+        or {item.model for item in record.signals}
+        != {trace.model_versions["signals"]}
+    ):
+        raise ValueError("stored signal metadata mismatch")
 
     job_refs = [
         *(item for fact in record.facts for item in fact.evidence),
@@ -792,6 +779,34 @@ def _validate_stored_record(record: AnalysisRecord) -> None:
         if _PROFILE_REF_PATTERN.fullmatch(item):
             continue
         _parse_jd_ref(item, job_digest, record.input_length)
+
+    expected_evidence = {
+        *(
+            item
+            for fact in record.facts
+            if fact.fact_id in traced_input_ids
+            for item in fact.evidence
+        ),
+        *(
+            item
+            for signal in record.signals
+            if signal.question_id in traced_input_ids
+            for item in signal.evidence
+        ),
+        *profile_refs,
+    }
+    if trace.evidence != sorted(expected_evidence):
+        raise ValueError("stored trace evidence is unbound")
+
+
+def _validate_stored_record_or_raise(record: AnalysisRecord) -> None:
+    failed = False
+    try:
+        _validate_stored_record(record)
+    except Exception:
+        failed = True
+    if failed:
+        raise AnalysisServiceError(_TRACE_CATEGORY, _TRACE_MESSAGE) from None
 
 
 def _parse_jd_ref(

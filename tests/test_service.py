@@ -326,13 +326,11 @@ def test_recompute_rejects_stored_input_trace_integrity_mismatch(tmp_path) -> No
     )
     store.save_analysis(tampered)
 
-    with pytest.raises(AnalysisServiceError, match="Job analysis failed safely."):
+    with pytest.raises(AnalysisServiceError) as exc_info:
         service.recompute_decision(original.id)
 
-    records = store.list_analyses()
-    assert records[0] == tampered
-    assert records[1].source_analysis_id == original.id
-    assert records[1].status == "failed"
+    assert exc_info.value.code == "trace_integrity_failed"
+    assert store.list_analyses() == [tampered]
 
 
 def test_missing_profile_returns_actionable_error(tmp_path) -> None:
@@ -554,8 +552,8 @@ def test_recompute_rejects_malformed_or_payload_bearing_jd_refs(
     with pytest.raises(AnalysisServiceError) as exc_info:
         service.recompute_decision(original.id)
 
-    assert exc_info.value.code == "analysis_failed"
-    assert [item.status for item in store.list_analyses()] == ["success", "failed"]
+    assert exc_info.value.code == "trace_integrity_failed"
+    assert store.list_analyses() == [poisoned]
 
 
 @pytest.mark.parametrize(
@@ -565,6 +563,13 @@ def test_recompute_rejects_malformed_or_payload_bearing_jd_refs(
         "unsafe_ids",
         "outbound_class",
         "input_length",
+        "unbound_input",
+        "extra_evidence",
+        "providers",
+        "models",
+        "prompt_versions",
+        "rubric_version",
+        "result_version",
         "jd_ref",
         "profile_ref",
     ],
@@ -593,6 +598,43 @@ def test_trace_read_rejects_malformed_stored_privacy_or_integrity_data(
         )
     elif corruption == "input_length":
         input_length = 1
+    elif corruption == "unbound_input":
+        trace = trace.model_copy(
+            update={
+                "input_ids": [
+                    *trace.input_ids,
+                    "PRIVATE RESUME secret@example.com",
+                ]
+            }
+        )
+    elif corruption == "extra_evidence":
+        trace = trace.model_copy(
+            update={
+                "evidence": [
+                    *trace.evidence,
+                    "jd-evidence:v1:"
+                    + original.input_hash.removeprefix("sha256:")
+                    + ":0:1:"
+                    + "a" * 64,
+                ]
+            }
+        )
+    elif corruption == "providers":
+        trace = trace.model_copy(
+            update={"providers": {**trace.providers, "facts": "PRIVATE API KEY"}}
+        )
+    elif corruption == "models":
+        trace = trace.model_copy(
+            update={"model_versions": {**trace.model_versions, "facts": "wrong"}}
+        )
+    elif corruption == "prompt_versions":
+        trace = trace.model_copy(
+            update={"prompt_versions": {**trace.prompt_versions, "facts": "wrong"}}
+        )
+    elif corruption == "rubric_version":
+        trace = trace.model_copy(update={"rubric_version": "PRIVATE RESUME"})
+    elif corruption == "result_version":
+        trace = trace.model_copy(update={"result_version": "wrong"})
     elif corruption == "jd_ref":
         trace = trace.model_copy(
             update={
@@ -627,6 +669,31 @@ def test_trace_read_rejects_malformed_stored_privacy_or_integrity_data(
     assert JOB_DESCRIPTION not in str(exc_info.value)
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
+
+
+def test_empty_stage_success_rejects_zero_input_length_on_trace_read(tmp_path) -> None:
+    rubric = Rubric(
+        version="empty-v1",
+        recommendation_thresholds={
+            RecommendationLevel.PRIORITY_APPLY: 0.8,
+            RecommendationLevel.APPLY_AFTER_REVIEW: 0.6,
+            RecommendationLevel.HOLD: 0.4,
+            RecommendationLevel.SKIP: 0,
+        },
+    )
+    service, store, _, _ = _service(
+        tmp_path,
+        profile=CandidateProfile(),
+        rubric=rubric,
+    )
+    original = service.analyze_job(JOB_DESCRIPTION)
+    tampered = original.model_copy(update={"input_length": 0})
+    store.save_analysis(tampered)
+
+    with pytest.raises(AnalysisServiceError) as exc_info:
+        service.get_decision_trace(original.id)
+
+    assert exc_info.value.code == "trace_integrity_failed"
 
 
 def test_full_raw_jd_value_is_rejected_without_persistence(tmp_path) -> None:
