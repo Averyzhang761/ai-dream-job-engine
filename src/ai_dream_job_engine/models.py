@@ -203,11 +203,30 @@ class Gap(DomainModel):
     candidate_evidence: list[str] = Field(default_factory=list)
 
 
+class DecisionContribution(DomainModel):
+    subject_id: str = Field(min_length=1)
+    score: float = Field(ge=0, le=1)
+    weight: float = Field(ge=0)
+    input_ids: list[str] = Field(min_length=1)
+    job_evidence: list[str] = Field(default_factory=list)
+    candidate_evidence: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def has_source_evidence(self) -> DecisionContribution:
+        if not self.job_evidence and not self.candidate_evidence:
+            raise ValueError("every contribution requires evidence")
+        return self
+
+
 class DecisionResult(DomainModel):
-    preference_score: float = Field(ge=0, le=1)
-    qualification_score: float = Field(ge=0, le=1)
+    preference_score: float | None = Field(default=None, ge=0, le=1)
+    qualification_score: float | None = Field(default=None, ge=0, le=1)
     recommendation: RecommendationLevel
     gaps: list[Gap] = Field(default_factory=list)
+    preference_contributions: list[DecisionContribution] = Field(default_factory=list)
+    qualification_contributions: list[DecisionContribution] = Field(
+        default_factory=list
+    )
     rubric_version: str = Field(min_length=1)
     prompt_version: str | None = None
     model_versions: dict[str, str] = Field(default_factory=dict)
