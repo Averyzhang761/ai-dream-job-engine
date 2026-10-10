@@ -66,10 +66,11 @@ Agent memory 是可选信息源，不是事实数据库：
 
 1. 默认关闭，只有用户主动选择时才读取；
 2. 用户可以限制导入范围，例如项目、技能、职业偏好或工作约束；
-3. 系统先生成带来源的变更预览，不直接修改 Candidate Profile；
-4. 用户逐项确认后，内容以 `user_confirmed` 保存，并保留原始来源；
-5. 后续刷新只展示新增、变化和冲突，不静默覆盖已有信息；
-6. 用户可以断开来源，并删除由该来源导入的信息。
+3. MCP Server 不直接扫描宿主的 memory；当前 Agent 只把授权范围内的候选信息和来源传入 MCP；
+4. 系统先生成带来源的变更预览，不直接修改 Candidate Profile；
+5. 用户逐项确认后，内容以 `user_confirmed` 保存，并保留原始来源；
+6. 后续刷新只展示新增、变化和冲突，不静默覆盖已有信息；
+7. 用户可以断开来源，并删除由该来源导入的信息。
 
 ### 5.3 分析岗位
 
@@ -217,7 +218,7 @@ JD 输入
 - `initialize_profile`：从简历生成待确认信息；
 - `review_profile_claims`：查看待确认信息及来源；
 - `confirm_profile_claims`：接受、修改或拒绝信息；
-- `preview_agent_memory_import`：按用户选择的范围预览 Agent memory 候选信息；
+- `preview_agent_memory_import`：接收当前 Agent 在授权范围内提供的候选信息，并生成差异预览；
 - `confirm_agent_memory_import`：确认、修改或拒绝导入变更；
 - `disconnect_agent_memory`：停止后续读取，并选择是否删除已导入信息；
 - `get_rubric`：读取默认模板和用户覆盖项；
