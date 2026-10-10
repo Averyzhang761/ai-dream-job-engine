@@ -6,6 +6,7 @@ import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 
 from ai_dream_job_engine.mcp_server import (
+    APPLICATION_CONFIG_ENV_VARS,
     ApplicationError,
     ConfiguredAnalysisApplication,
     LocalProfileApplication,
@@ -23,6 +24,7 @@ from ai_dream_job_engine.models import (
     RubricPatch,
 )
 from ai_dream_job_engine.rubric import load_default_rubric
+from ai_dream_job_engine.service import AnalysisServiceError
 
 
 class MemoryStore:
@@ -270,11 +272,11 @@ def test_rubric_read_transform_save_operations_are_serialized() -> None:
 
 
 @pytest.mark.asyncio
-async def test_server_construction_and_tool_listing_do_not_read_environment(
+async def test_server_construction_and_listing_do_not_read_application_config(
     monkeypatch,
 ) -> None:
     original_getenv = os.getenv
-    protected = {
+    expected_watchlist = {
         "AI_DREAM_JOB_DATA_PATH",
         "AI_DREAM_JOB_FACT_PROVIDER",
         "AI_DREAM_JOB_FACT_MODEL",
@@ -282,9 +284,10 @@ async def test_server_construction_and_tool_listing_do_not_read_environment(
         "OPENROUTER_API_KEY",
         "TYPESAFE_API_KEY",
     }
+    assert APPLICATION_CONFIG_ENV_VARS == expected_watchlist
 
     def forbidden_getenv(key, *args, **kwargs):
-        if key in protected:
+        if key in APPLICATION_CONFIG_ENV_VARS:
             raise AssertionError("application environment read during construction")
         return original_getenv(key, *args, **kwargs)
 
@@ -293,6 +296,108 @@ async def test_server_construction_and_tool_listing_do_not_read_environment(
     tools = await build_server().list_tools()
 
     assert len(tools) == 12
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("service_code", "public_code", "safe_message"),
+    [
+        (
+            "missing_rubric",
+            "rubric_not_initialized",
+            "Initialize the decision rubric before analyzing a job.",
+        ),
+        (
+            "analysis_not_found",
+            "analysis_not_found",
+            "Choose an existing successful analysis and retry.",
+        ),
+        (
+            "analysis_not_successful",
+            "analysis_unavailable",
+            "Choose a successful analysis before this action.",
+        ),
+        (
+            "trace_unavailable",
+            "analysis_unavailable",
+            "Choose a successful analysis before this action.",
+        ),
+        (
+            "analysis_failed",
+            "analysis_failed",
+            "Job analysis failed safely; verify provider availability and retry.",
+        ),
+        (
+            "empty_job_description",
+            "invalid_job_description",
+            "Provide a non-empty public job description.",
+        ),
+        (
+            "trace_integrity_failed",
+            "trace_integrity_failure",
+            "Stored decision trace could not be verified; rerun the analysis.",
+        ),
+        (
+            "provider_not_configured",
+            "analysis_provider_config",
+            "Configure the selected analysis provider before analyzing a job.",
+        ),
+        (
+            "missing_profile",
+            "profile_not_initialized",
+            "Initialize the candidate profile before this action.",
+        ),
+        (
+            "storage_failed",
+            "storage_failure",
+            "Local data could not be saved or loaded; retry the action.",
+        ),
+        (
+            "failure_audit_persistence_failed",
+            "storage_failure",
+            "Local data could not be saved or loaded; retry the action.",
+        ),
+        (
+            "unexpected_private_code",
+            "analysis_failure",
+            "The analysis action could not be completed safely.",
+        ),
+    ],
+)
+async def test_expected_analysis_errors_have_fixed_public_recovery_messages(
+    service_code, public_code, safe_message
+) -> None:
+    class RaisingAnalysisService(StaticAnalysisService):
+        def analyze_job(self, job_description):
+            raise AnalysisServiceError(
+                service_code,
+                "/private/path secret-id OPENAI_API_KEY=secret",
+            )
+
+    server = build_server(
+        MCPServices(
+            profile=LocalProfileApplication(
+                MemoryStore(profile=CandidateProfile())
+            ),
+            rubric=StaticRubricService(),
+            analysis=RaisingAnalysisService(),
+        )
+    )
+
+    with pytest.raises(ToolError) as raised:
+        await server.call_tool(
+            "analyze_job", {"job_description": "Public job text"}
+        )
+
+    _assert_safe_error(
+        raised.value,
+        public_code,
+        safe_message,
+        "/private/path",
+        "secret-id",
+        "OPENAI_API_KEY",
+        "unexpected_private_code",
+    )
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
+from packaging.markers import Marker
 
 from ai_dream_job_engine.mcp_server import MCPServices, build_server
 from ai_dream_job_engine.models import AnalysisRecord, CandidateProfile, Rubric
@@ -172,7 +173,10 @@ def test_mcp_dependency_uses_only_platform_bound_cryptography_cap() -> None:
 
     assert '"mcp[cli]>=2,<3"' in project
     assert (
-        '"cryptography<47; sys_platform == \'darwin\' '
-        'and platform_machine == \'arm64\'"'
+        '"cryptography<49; sys_platform == \'darwin\' '
+        'and platform_machine == \'x86_64\'"'
     ) in project
-    assert '"cryptography>=46,<47"' not in project
+    assert 'cryptography<47' not in project
+    assert Marker(
+        "sys_platform == 'darwin' and platform_machine == 'x86_64'"
+    ).evaluate()

@@ -44,6 +44,23 @@ from ai_dream_job_engine.service import AnalysisServiceError, JobAnalysisService
 NonEmptyString = Annotated[str, Field(min_length=1)]
 NonEmptyStrings = Annotated[list[str], Field(min_length=1)]
 
+_DATA_PATH_ENV = "AI_DREAM_JOB_DATA_PATH"
+_FACT_PROVIDER_ENV = "AI_DREAM_JOB_FACT_PROVIDER"
+_FACT_MODEL_ENV = "AI_DREAM_JOB_FACT_MODEL"
+_OPENAI_KEY_ENV = "OPENAI_API_KEY"
+_OPENROUTER_KEY_ENV = "OPENROUTER_API_KEY"
+_JEV_KEY_ENV = "TYPESAFE_API_KEY"
+APPLICATION_CONFIG_ENV_VARS = frozenset(
+    {
+        _DATA_PATH_ENV,
+        _FACT_PROVIDER_ENV,
+        _FACT_MODEL_ENV,
+        _OPENAI_KEY_ENV,
+        _OPENROUTER_KEY_ENV,
+        _JEV_KEY_ENV,
+    }
+)
+
 PROFILE_NOT_INITIALIZED = (
     "profile_not_initialized",
     "Initialize the candidate profile before this action.",
@@ -67,6 +84,30 @@ STORAGE_FAILURE = (
 ANALYSIS_PROVIDER_CONFIG = (
     "analysis_provider_config",
     "Configure the selected analysis provider before analyzing a job.",
+)
+RUBRIC_NOT_INITIALIZED = (
+    "rubric_not_initialized",
+    "Initialize the decision rubric before analyzing a job.",
+)
+ANALYSIS_NOT_FOUND = (
+    "analysis_not_found",
+    "Choose an existing successful analysis and retry.",
+)
+ANALYSIS_UNAVAILABLE = (
+    "analysis_unavailable",
+    "Choose a successful analysis before this action.",
+)
+ANALYSIS_FAILED = (
+    "analysis_failed",
+    "Job analysis failed safely; verify provider availability and retry.",
+)
+INVALID_JOB_DESCRIPTION = (
+    "invalid_job_description",
+    "Provide a non-empty public job description.",
+)
+TRACE_INTEGRITY_FAILURE = (
+    "trace_integrity_failure",
+    "Stored decision trace could not be verified; rerun the analysis.",
 )
 ANALYSIS_FAILURE = (
     "analysis_failure",
@@ -391,19 +432,21 @@ class ConfiguredAnalysisApplication:
 
     @staticmethod
     def _fact_provider() -> OpenAICompatibleProvider:
-        provider = os.getenv("AI_DREAM_JOB_FACT_PROVIDER", "openai")
+        provider = os.getenv(_FACT_PROVIDER_ENV, "openai")
         if provider not in {"openai", "openrouter"}:
             raise ValueError("unsupported provider")
-        key_name = "OPENAI_API_KEY" if provider == "openai" else "OPENROUTER_API_KEY"
+        key_name = (
+            _OPENAI_KEY_ENV if provider == "openai" else _OPENROUTER_KEY_ENV
+        )
         return OpenAICompatibleProvider(
             provider=provider,
             api_key=os.getenv(key_name, ""),
-            model=os.getenv("AI_DREAM_JOB_FACT_MODEL", ""),
+            model=os.getenv(_FACT_MODEL_ENV, ""),
         )
 
     @staticmethod
     def _signal_provider() -> JevSignalProvider:
-        return JevSignalProvider(api_key=os.getenv("TYPESAFE_API_KEY"))
+        return JevSignalProvider(api_key=os.getenv(_JEV_KEY_ENV))
 
 
 class _UnavailableFactProvider:
@@ -442,7 +485,7 @@ def _preview_binding_digest(
 
 
 def _default_database_path() -> Path:
-    configured_path = os.getenv("AI_DREAM_JOB_DATA_PATH")
+    configured_path = os.getenv(_DATA_PATH_ENV)
     if configured_path:
         return Path(configured_path).expanduser()
     project_root = Path(__file__).resolve().parents[2]
@@ -461,6 +504,18 @@ def default_services() -> MCPServices:
 def _analysis_public_error(error: AnalysisServiceError) -> tuple[str, str]:
     if error.code == "missing_profile":
         return PROFILE_NOT_INITIALIZED
+    if error.code == "missing_rubric":
+        return RUBRIC_NOT_INITIALIZED
+    if error.code == "analysis_not_found":
+        return ANALYSIS_NOT_FOUND
+    if error.code in {"analysis_not_successful", "trace_unavailable"}:
+        return ANALYSIS_UNAVAILABLE
+    if error.code == "analysis_failed":
+        return ANALYSIS_FAILED
+    if error.code in {"empty_job_description", "invalid_job_description"}:
+        return INVALID_JOB_DESCRIPTION
+    if error.code == "trace_integrity_failed":
+        return TRACE_INTEGRITY_FAILURE
     if error.code == "provider_not_configured":
         return ANALYSIS_PROVIDER_CONFIG
     if error.code in {
