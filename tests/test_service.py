@@ -221,18 +221,43 @@ def test_recompute_reuses_normalized_inputs_without_model_calls(tmp_path) -> Non
 
 def test_recompute_uses_current_rubric_missing_and_stale_semantics(tmp_path) -> None:
     ids = iter(["analysis-1", "unused-attempt"])
+    signal_provider = FakeSignalProvider(
+        outputs=[
+            DecisionSignal(
+                question_id="role_fit",
+                question_version="question-v1",
+                probability=1,
+                evidence=["Remote role"],
+                provider="fake-signals",
+                model="signals-model-v1",
+            )
+        ]
+    )
     service, store, extractor, signal_provider = _service(
         tmp_path,
         profile=CandidateProfile(),
         rubric=_rubric(),
+        signal_provider=signal_provider,
         id_factory=lambda: next(ids),
     )
     original = service.analyze_job(JOB_DESCRIPTION)
     current = _rubric(version="rubric-v2").model_copy(
         update={
+            "facts": [
+                FactDefinition(
+                    id="new_fact",
+                    name="New fact",
+                    definition="A newly configured job fact.",
+                    data_type="text",
+                    extraction_instructions="Extract the new fact.",
+                )
+            ],
             "dimensions": [
                 _rubric().dimensions[0].model_copy(
-                    update={"signal_ids": ["role_fit", "new_signal"]}
+                    update={
+                        "fact_ids": ["new_fact"],
+                        "signal_ids": ["role_fit", "new_signal"],
+                    }
                 )
             ],
             "questions": [
@@ -258,14 +283,22 @@ def test_recompute_uses_current_rubric_missing_and_stale_semantics(tmp_path) -> 
     assert recomputed.result is not None
     assert recomputed.result.needs_review is True
     assert {gap.subject_id for gap in recomputed.result.gaps} == {
+        "new_fact",
         "role_fit",
         "new_signal",
     }
     assert recomputed.trace is not None
+    assert {
+        item
+        for item in recomputed.trace.input_ids
+        if not item.startswith("profile-ref:v1:")
+    } == {"new_fact", "role_fit", "new_signal"}
     assert recomputed.trace.question_versions == {
         "role_fit": "question-v2",
         "new_signal": "question-v1",
     }
+    assert original.facts[0].evidence[0] not in recomputed.trace.evidence
+    assert original.signals[0].evidence[0] in recomputed.trace.evidence
     assert len(extractor.calls) == 1
     assert len(signal_provider.calls) == 1
 
@@ -458,6 +491,62 @@ def test_success_projects_all_evidence_to_auditable_opaque_refs(tmp_path) -> Non
     assert f":0:{len(JOB_DESCRIPTION)}:" in offset_ref
 
 
+@pytest.mark.parametrize(
+    "malformed_ref",
+    [
+        "wrong-scheme:v1:{job}:0:1:{quote}",
+        "jd-evidence:v2:{job}:0:1:{quote}",
+        "jd-evidence:v1:{short_job}:0:1:{quote}",
+        "jd-evidence:v1:{upper_job}:0:1:{quote}",
+        "jd-evidence:v1:{other_job}:0:1:{quote}",
+        "jd-evidence:v1:{job}:-1:1:{quote}",
+        "jd-evidence:v1:{job}:zero:1:{quote}",
+        "jd-evidence:v1:{job}:2:1:{quote}",
+        "jd-evidence:v1:{job}:0:1:{short_quote}",
+        "jd-evidence:v1:{job}:0:1:{upper_quote}",
+        "jd-evidence:v1:{job}:0:1:{quote}:trailing",
+        "jd-evidence:v1:{job}:0:44:" + JOB_DESCRIPTION,
+    ],
+)
+def test_recompute_rejects_malformed_or_payload_bearing_jd_refs(
+    tmp_path,
+    malformed_ref,
+) -> None:
+    ids = iter(["analysis-1", "failure-attempt-1"])
+    service, store, _, _ = _service(
+        tmp_path,
+        profile=CandidateProfile(),
+        rubric=_rubric(),
+        id_factory=lambda: next(ids),
+    )
+    original = service.analyze_job(JOB_DESCRIPTION)
+    job_digest = original.input_hash.removeprefix("sha256:")
+    quote_digest = "a" * 64
+    poisoned_ref = malformed_ref.format(
+        job=job_digest,
+        short_job=job_digest[:-1],
+        upper_job=job_digest.upper(),
+        other_job="0" * 64,
+        quote=quote_digest,
+        short_quote=quote_digest[:-1],
+        upper_quote=quote_digest.upper(),
+    )
+    poisoned = original.model_copy(
+        update={
+            "signals": [
+                original.signals[0].model_copy(update={"evidence": [poisoned_ref]})
+            ]
+        }
+    )
+    store.save_analysis(poisoned)
+
+    with pytest.raises(AnalysisServiceError) as exc_info:
+        service.recompute_decision(original.id)
+
+    assert exc_info.value.code == "analysis_failed"
+    assert [item.status for item in store.list_analyses()] == ["success", "failed"]
+
+
 def test_full_raw_jd_value_is_rejected_without_persistence(tmp_path) -> None:
     service, store, _, _ = _service(
         tmp_path,
@@ -557,6 +646,39 @@ def test_successful_recompute_does_not_allocate_unused_failure_id(tmp_path) -> N
     assert store.list_analyses() == [recomputed]
 
 
+def test_failed_recompute_id_collision_reports_missing_audit_record(tmp_path) -> None:
+    service, store, _, _ = _service(
+        tmp_path,
+        profile=CandidateProfile(),
+        rubric=_rubric(),
+        id_factory=lambda: "analysis-1",
+    )
+    original = service.analyze_job(JOB_DESCRIPTION)
+    store.save_profile(
+        CandidateProfile(
+            claims=[
+                CandidateClaim(
+                    id="invalid",
+                    claim_type="not-in-rubric",
+                    value=True,
+                    source=ClaimSource.USER_CONFIRMED,
+                    confirmed=True,
+                    provenance="secret",
+                )
+            ]
+        )
+    )
+
+    with pytest.raises(AnalysisServiceError) as exc_info:
+        service.recompute_decision(original.id)
+
+    assert exc_info.value.code == "failure_audit_persistence_failed"
+    assert str(exc_info.value) == (
+        "Analysis failed, and its audit record could not be persisted safely."
+    )
+    assert store.list_analyses() == [original]
+
+
 @pytest.mark.parametrize("provider_fails", [False, True])
 def test_store_failures_are_fixed_errors_without_secret_context(
     tmp_path,
@@ -579,11 +701,13 @@ def test_store_failures_are_fixed_errors_without_secret_context(
         AnalysisServiceError,
         match="Local analysis storage failed safely."
         if not provider_fails
-        else "Job analysis failed safely.",
+        else "Analysis failed, and its audit record could not be persisted safely.",
     ) as exc_info:
         service.analyze_job(JOB_DESCRIPTION)
 
     assert "api-key-secret" not in str(exc_info.value)
+    if provider_fails:
+        assert exc_info.value.code == "failure_audit_persistence_failed"
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
 
@@ -833,5 +957,8 @@ def test_failed_recompute_storage_failure_keeps_prior_success(
     with pytest.raises(AnalysisServiceError) as exc_info:
         service.recompute_decision(original.id)
 
-    assert str(exc_info.value) == "Job analysis failed safely."
+    assert exc_info.value.code == "failure_audit_persistence_failed"
+    assert str(exc_info.value) == (
+        "Analysis failed, and its audit record could not be persisted safely."
+    )
     assert store.list_analyses() == [original]

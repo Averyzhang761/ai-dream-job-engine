@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import re
 import time
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, TypeVar
+from typing import Any, NoReturn, TypeVar
 
 from ai_dream_job_engine.database import LocalStore
 from ai_dream_job_engine.decision import decide_job
@@ -36,6 +38,11 @@ _STORAGE_CATEGORY = "storage_failed"
 _STORAGE_MESSAGE = "Local analysis storage failed safely."
 _ID_CATEGORY = "analysis_id_collision"
 _ID_MESSAGE = "A unique analysis ID could not be allocated safely."
+_AUDIT_CATEGORY = "failure_audit_persistence_failed"
+_AUDIT_MESSAGE = "Analysis failed, and its audit record could not be persisted safely."
+_JD_REF_PATTERN = re.compile(
+    r"jd-evidence:v1:([0-9a-f]{64}):([0-9]+):([0-9]+):([0-9a-f]{64})\Z"
+)
 _T = TypeVar("_T")
 
 
@@ -45,6 +52,13 @@ class AnalysisServiceError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+@dataclass(frozen=True)
+class _DecisionSurface:
+    input_ids: frozenset[str]
+    fact_ids: frozenset[str]
+    question_versions: dict[str, str]
 
 
 class _PersistedRecordSafety:
@@ -145,13 +159,8 @@ class _PersistedRecordSafety:
             self._complete(record.facts, record.signals)
         self._versions(record)
         self._evidence(record)
-        expected_inputs = {
-            self.profile.id,
-            *(claim.id for claim in self.profile.claims if claim.confirmed),
-            *(item.fact_id for item in record.facts),
-            *(item.question_id for item in record.signals),
-        }
-        if set(record.trace.input_ids) != expected_inputs:
+        surface = _decision_surface(self.profile, self.rubric)
+        if set(record.trace.input_ids) != surface.input_ids:
             raise ValueError("trace input refs incomplete")
         if record.trace.outbound_data_classes != [DataClass.PUBLIC_JOB_DATA]:
             raise ValueError("unsafe outbound data class")
@@ -172,13 +181,25 @@ class _PersistedRecordSafety:
             raise ValueError("stored signals are duplicated")
         if trace.analysis_id != record.id:
             raise ValueError("stored trace identity mismatch")
-        stored_input_ids = set(fact_ids + [item[0] for item in signal_keys])
+        result_input_ids = {
+            input_id
+            for item in (
+                result.preference_contributions
+                + result.qualification_contributions
+                + result.gaps
+            )
+            for input_id in item.input_ids
+        }
+        stored_input_ids = set(fact_ids) | set(trace.question_versions) | result_input_ids
         traced_input_ids = {
             item
             for item in trace.input_ids
             if not item.startswith("profile-ref:v1:")
         }
-        if traced_input_ids != stored_input_ids:
+        if (
+            not set(trace.question_versions).issubset(traced_input_ids)
+            or not traced_input_ids.issubset(stored_input_ids)
+        ):
             raise ValueError("stored trace inputs are incomplete")
         expected_stages = {
             *({"facts"} if record.facts else set()),
@@ -264,8 +285,8 @@ class _PersistedRecordSafety:
                 not item for item in versions.values()
             ):
                 raise ValueError("stage metadata incomplete")
-        questions = {item.id: item.version for item in self.rubric.questions}
-        if trace.question_versions != questions:
+        surface = _decision_surface(self.profile, self.rubric)
+        if trace.question_versions != surface.question_versions:
             raise ValueError("question versions incomplete")
         if trace.rubric_version != self.rubric.version:
             raise ValueError("trace rubric stale")
@@ -305,23 +326,21 @@ class _PersistedRecordSafety:
             ),
             *(item for gap in result.gaps for item in gap.candidate_evidence),
         ]
-        if any(not self._job_ref(item) for item in job_refs):
-            raise ValueError("raw job evidence")
+        for item in job_refs:
+            _parse_jd_ref(item, self.job_digest)
         if any(not item.startswith("profile-ref:v1:") for item in profile_refs):
             raise ValueError("raw profile evidence")
-        if any(
-            not (
-                self._job_ref(item)
-                or item.startswith("profile-ref:v1:")
-            )
-            for item in trace.evidence
-        ):
-            raise ValueError("raw trace evidence")
+        for item in trace.evidence:
+            if item.startswith("profile-ref:v1:"):
+                continue
+            _parse_jd_ref(item, self.job_digest)
 
     def _jd_ref(self, start: int, end: int, value: str) -> str:
-        return (
+        ref = (
             f"jd-evidence:v1:{self.job_digest}:{start}:{end}:{_digest(value)}"
         )
+        _parse_jd_ref(ref, self.job_digest)
+        return ref
 
     def _signal_ref(self, value: str) -> str | None:
         """Keep only evidence resolvable against a user-resupplied JD."""
@@ -332,17 +351,14 @@ class _PersistedRecordSafety:
             return self._jd_ref(start, start + len(value), value)
         return None
 
-    def _job_ref(self, value: str) -> bool:
-        return value.startswith(f"jd-evidence:v1:{self.job_digest}:")
-
-
 class JobAnalysisService:
     """Orchestrate providers and persist only safety-projected records.
 
     New analyses and failed recompute attempts are append-only. Successful
     recompute updates its original stable ID without allocating an attempt ID.
     Unconfigured provider stages are skipped, and non-JD model rationale is
-    discarded. Pipeline and storage errors expose only fixed safe messages.
+    discarded. Pipeline and storage errors expose only fixed safe messages;
+    failure-record persistence faults are reported distinctly.
     """
 
     def __init__(
@@ -424,16 +440,13 @@ class JobAnalysisService:
         except Exception:
             failed = True
         if failed:
-            self._try_failure(
+            self._raise_failed_analysis(
                 safety,
-                analysis_id,
                 input_hash,
                 created_at,
                 started_at,
+                analysis_id=analysis_id,
             )
-            raise AnalysisServiceError(
-                _FAILURE_CATEGORY, _FAILURE_MESSAGE
-            ) from None
         self._insert_or_raise(record)
         return record
 
@@ -500,19 +513,13 @@ class JobAnalysisService:
         except Exception:
             failed = True
         if failed:
-            attempt_id = self._failure_attempt_id()
-            if attempt_id is not None:
-                self._try_failure(
-                    safety,
-                    attempt_id,
-                    existing.input_hash,
-                    self._utc_clock(),
-                    started_at,
-                    source_analysis_id=existing.id,
-                )
-            raise AnalysisServiceError(
-                _FAILURE_CATEGORY, _FAILURE_MESSAGE
-            ) from None
+            self._raise_failed_analysis(
+                safety,
+                existing.input_hash,
+                self._utc_clock(),
+                started_at,
+                source_analysis_id=existing.id,
+            )
         self._save_or_raise(recomputed)
         return recomputed
 
@@ -595,12 +602,6 @@ class JobAnalysisService:
             metadata["prompts"][stage] = _prompt_version(provider)
         return metadata
 
-    def _failure_attempt_id(self) -> str | None:
-        try:
-            return self._allocate_id()
-        except AnalysisServiceError:
-            return None
-
     def _find_analysis(self, analysis_id: str) -> AnalysisRecord | None:
         records = self._store_call(self._store.list_analyses)
         return next((item for item in records if item.id == analysis_id), None)
@@ -627,20 +628,22 @@ class JobAnalysisService:
                 _STORAGE_CATEGORY, _STORAGE_MESSAGE
             ) from None
 
-    def _try_failure(
+    def _raise_failed_analysis(
         self,
         safety: _PersistedRecordSafety,
-        analysis_id: str,
         input_hash: str,
         created_at: datetime,
         started_at: float,
         *,
+        analysis_id: str | None = None,
         source_analysis_id: str | None = None,
-    ) -> None:
+    ) -> NoReturn:
+        failed = False
         try:
+            attempt_id = analysis_id or self._allocate_id()
             record = safety.validate(
                 AnalysisRecord(
-                    id=analysis_id,
+                    id=attempt_id,
                     source_analysis_id=source_analysis_id,
                     input_hash=input_hash,
                     status="failed",
@@ -652,7 +655,10 @@ class JobAnalysisService:
             )
             self._store.insert_analysis(record)
         except Exception:
-            pass
+            failed = True
+        if failed:
+            raise AnalysisServiceError(_AUDIT_CATEGORY, _AUDIT_MESSAGE) from None
+        raise AnalysisServiceError(_FAILURE_CATEGORY, _FAILURE_MESSAGE) from None
 
     def _store_call(self, operation: Callable[[], _T]) -> _T:
         failed = False
@@ -696,8 +702,19 @@ def _trace(
     result: DecisionResult,
     metadata: dict[str, dict[str, str]],
 ) -> DecisionTrace:
-    evidence = [item for fact in facts for item in fact.evidence]
-    evidence += [item for signal in signals for item in signal.evidence]
+    surface = _decision_surface(profile, rubric)
+    evidence = [
+        item
+        for fact in facts
+        if fact.fact_id in surface.fact_ids
+        for item in fact.evidence
+    ]
+    evidence += [
+        item
+        for signal in signals
+        if signal.question_id in surface.question_versions
+        for item in signal.evidence
+    ]
     evidence += [
         item
         for contribution in (
@@ -708,26 +725,50 @@ def _trace(
     evidence += [item for gap in result.gaps for item in gap.candidate_evidence]
     return DecisionTrace(
         analysis_id=analysis_id,
-        input_ids=sorted(
-            {
-                profile.id,
-                *(claim.id for claim in profile.claims if claim.confirmed),
-                *(fact.fact_id for fact in facts),
-                *(signal.question_id for signal in signals),
-            }
-        ),
+        input_ids=sorted(surface.input_ids),
         evidence=sorted(set(evidence)),
         providers=metadata["providers"],
         model_versions=metadata["models"],
         rubric_version=rubric.version,
         prompt_versions=metadata["prompts"],
-        question_versions={
-            item.id: item.version
-            for item in sorted(rubric.questions, key=lambda item: item.id)
-        },
+        question_versions=surface.question_versions,
         result_version=result.result_version,
         outbound_data_classes=[DataClass.PUBLIC_JOB_DATA],
     )
+
+
+def _decision_surface(
+    profile: CandidateProfile,
+    rubric: Rubric,
+) -> _DecisionSurface:
+    fact_ids = frozenset(item.id for item in rubric.facts)
+    question_versions = {
+        item.id: item.version
+        for item in sorted(rubric.questions, key=lambda item: item.id)
+    }
+    return _DecisionSurface(
+        input_ids=frozenset(
+            {
+                profile.id,
+                *(claim.id for claim in profile.claims if claim.confirmed),
+                *fact_ids,
+                *question_versions,
+            }
+        ),
+        fact_ids=fact_ids,
+        question_versions=question_versions,
+    )
+
+
+def _parse_jd_ref(value: str, expected_job_digest: str) -> tuple[int, int, str]:
+    match = _JD_REF_PATTERN.fullmatch(value)
+    if match is None or match.group(1) != expected_job_digest:
+        raise ValueError("invalid JD evidence reference")
+    start = int(match.group(2))
+    end = int(match.group(3))
+    if start > end:
+        raise ValueError("invalid JD evidence span")
+    return start, end, match.group(4)
 
 
 def _input_hash(value: str) -> str:
