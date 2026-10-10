@@ -616,6 +616,9 @@ def test_complete_favorable_default_rubric_fixture_is_priority_apply() -> None:
         "work_arrangement_terms": ["remote"],
         "compensation_terms": "salary range",
         "work_authorization_requirement": ["sponsorship available"],
+        "required_skills": ["Python", "RAG"],
+        "minimum_experience_years": 5,
+        "applied_ai_requirements": ["evaluation", "agents"],
     }
     facts = [
         _fact(fact.id, values[fact.id], f"JD evidence:{fact.id}")
@@ -643,6 +646,109 @@ def test_complete_favorable_default_rubric_fixture_is_priority_apply() -> None:
     assert result.gaps == []
 
 
+def test_available_version_matched_signal_needs_no_quote() -> None:
+    rubric = _rubric()
+    result = decide_job(
+        _facts(),
+        [
+            DecisionSignal(
+                question_id="preference_signal",
+                question_version="1",
+                probability=0.9,
+                provider="jev",
+                model="jev-latest",
+            )
+        ],
+        CandidateProfile(claims=_strong_claims()),
+        rubric,
+    )
+
+    contribution = next(
+        item for item in result.preference_contributions if item.subject_id == "preference"
+    )
+    assert contribution.score == 1
+    assert contribution.job_evidence == ["JD role evidence"]
+    assert contribution.audit_support == [
+        "signal:jev:jev-latest:preference_signal:1"
+    ]
+
+
+@pytest.mark.parametrize("unknown", [False, True])
+def test_configured_default_is_typed_and_auditable(unknown: bool) -> None:
+    rubric = _rubric()
+    rubric.facts[0] = rubric.facts[0].model_copy(
+        update={"missing_policy": "default", "default_value": True}
+    )
+    facts = [item for item in _facts() if item.fact_id != "preferred_role"]
+    if unknown:
+        facts.append(ExtractedFact(fact_id="preferred_role", is_unknown=True))
+
+    result = decide_job(
+        facts,
+        _signals(),
+        CandidateProfile(claims=_strong_claims()),
+        rubric,
+    )
+
+    contribution = next(
+        item for item in result.preference_contributions if item.subject_id == "preference"
+    )
+    assert contribution.score == 1
+    assert contribution.job_evidence == ["classifier preference evidence"]
+    assert contribution.audit_support == ["configured-default:preferred_role"]
+
+
+def test_default_rubric_material_qualifications_report_missing_and_conflict() -> None:
+    rubric = load_default_rubric()
+    values = {
+        "role_family": "applied AI",
+        "ai_scope": "LLM evaluation",
+        "product_customer_scope": "customers",
+        "ownership_scope": "own launch",
+        "infrastructure_scope": "model serving",
+        "work_arrangement_terms": ["remote"],
+        "compensation_terms": "salary range",
+        "work_authorization_requirement": [],
+        "required_skills": ["Python", "RAG"],
+        "minimum_experience_years": 5,
+        "applied_ai_requirements": ["evaluation", "agents"],
+    }
+    facts = [
+        _fact(fact.id, values[fact.id], f"JD evidence:{fact.id}")
+        for fact in rubric.facts
+    ]
+    profile = CandidateProfile(
+        claims=[
+            _claim("skills", "required_skills", ["Python"]),
+            _claim("experience", "minimum_experience_years", 3),
+            _claim("applied-ai", "applied_ai_requirements", ["evaluation"]),
+        ]
+    )
+
+    result = decide_job(facts, [], profile, rubric)
+
+    assert {
+        gap.subject_id
+        for gap in result.gaps
+        if gap.kind is GapKind.CAPABILITY_GAP
+    } == {
+        "required_skills",
+        "minimum_experience_years",
+        "applied_ai_requirements",
+    }
+
+    missing = decide_job(facts, [], CandidateProfile(), rubric)
+    assert {
+        gap.subject_id
+        for gap in missing.gaps
+        if gap.kind is GapKind.EVIDENCE_GAP
+    } >= {
+        "required_skills",
+        "minimum_experience_years",
+        "applied_ai_requirements",
+    }
+
+
 def test_default_preference_and_synonym_differences_are_not_capability_gaps() -> None:
     rubric = load_default_rubric()
     values = {
@@ -654,6 +760,9 @@ def test_default_preference_and_synonym_differences_are_not_capability_gaps() ->
         "work_arrangement_terms": ["remote"],
         "compensation_terms": "salary range",
         "work_authorization_requirement": ["sponsorship available"],
+        "required_skills": ["Python", "RAG"],
+        "minimum_experience_years": 5,
+        "applied_ai_requirements": ["evaluation", "agents"],
     }
     candidate_values = {
         **values,

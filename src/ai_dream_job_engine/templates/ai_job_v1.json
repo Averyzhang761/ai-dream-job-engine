@@ -91,6 +91,45 @@
       "enum_values": [],
       "candidate_comparison": "allowed_alternatives",
       "qualification_weight": 1.0
+    },
+    {
+      "id": "required_skills",
+      "name": "Required skills",
+      "definition": "The explicit skills and technologies required for the role.",
+      "data_type": "list",
+      "extraction_instructions": "Extract only explicitly required skills and technologies as normalized values.",
+      "requires_evidence": true,
+      "missing_policy": "unknown",
+      "default_value": null,
+      "enum_values": [],
+      "candidate_comparison": "required_subset",
+      "qualification_weight": 1.0
+    },
+    {
+      "id": "minimum_experience_years",
+      "name": "Minimum experience",
+      "definition": "The minimum number of years of relevant experience explicitly required.",
+      "data_type": "number",
+      "extraction_instructions": "Extract the explicit minimum years of relevant experience as a number.",
+      "requires_evidence": true,
+      "missing_policy": "unknown",
+      "default_value": null,
+      "enum_values": [],
+      "candidate_comparison": "candidate_at_least",
+      "qualification_weight": 1.0
+    },
+    {
+      "id": "applied_ai_requirements",
+      "name": "Applied AI requirements",
+      "definition": "The explicit applied-AI capabilities required for the role.",
+      "data_type": "list",
+      "extraction_instructions": "Extract required applied-AI capabilities such as evaluation, retrieval, agents, or model integration.",
+      "requires_evidence": true,
+      "missing_policy": "unknown",
+      "default_value": null,
+      "enum_values": [],
+      "candidate_comparison": "required_subset",
+      "qualification_weight": 1.0
     }
   ],
   "dimensions": [

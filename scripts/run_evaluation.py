@@ -226,7 +226,9 @@ def _unsupported_sources(record: object) -> dict[str, int]:
         *getattr(result, "qualification_contributions", []),
     ]
     contribution_count = sum(
-        not contribution.job_evidence and not contribution.candidate_evidence
+        not contribution.job_evidence
+        and not contribution.candidate_evidence
+        and not getattr(contribution, "audit_support", [])
         for contribution in contributions
     )
     return {

@@ -4,6 +4,7 @@ import hashlib
 from collections.abc import Callable
 from datetime import datetime, timezone
 
+import httpx
 import pytest
 
 from ai_dream_job_engine.database import LocalStore
@@ -15,13 +16,17 @@ from ai_dream_job_engine.models import (
     DecisionQuestion,
     DecisionSignal,
     ExtractedFact,
+    FactDataType,
     FactDefinition,
     RecommendationLevel,
     Rubric,
+    RubricPatch,
     ScoringDirection,
     ValueDimension,
 )
 from ai_dream_job_engine.providers.base import ProviderError
+from ai_dream_job_engine.providers.jev import JevSignalProvider
+from ai_dream_job_engine.rubric import apply_rubric_patch, load_default_rubric
 from ai_dream_job_engine.service import AnalysisServiceError, JobAnalysisService
 
 
@@ -237,6 +242,139 @@ def test_recompute_reuses_normalized_inputs_without_model_calls(tmp_path) -> Non
     assert recomputed.trace.model_versions == original.trace.model_versions
     assert recomputed.trace.prompt_versions == original.trace.prompt_versions
     assert store.list_analyses() == [recomputed]
+
+
+def test_configured_default_persists_and_recomputes_with_audit_support(tmp_path) -> None:
+    rubric = _rubric()
+    rubric.facts[0] = rubric.facts[0].model_copy(
+        update={
+            "data_type": FactDataType.BOOLEAN,
+            "missing_policy": "default",
+            "default_value": True,
+        }
+    )
+    rubric.dimensions[0] = rubric.dimensions[0].model_copy(
+        update={"fact_ids": ["job_title"], "signal_ids": []}
+    )
+    rubric.questions = []
+    extractor = FakeFactExtractor(
+        outputs=[
+            ExtractedFact(
+                fact_id="job_title",
+                is_unknown=True,
+                provider="fake-facts",
+                model="facts-model-v1",
+            )
+        ]
+    )
+    service, store, _, _ = _service(
+        tmp_path,
+        profile=CandidateProfile(),
+        rubric=rubric,
+        extractor=extractor,
+    )
+
+    original = service.analyze_job(JOB_DESCRIPTION)
+    recomputed = service.recompute_decision(original.id)
+
+    for record in (original, store.list_analyses()[0], recomputed):
+        assert record.result is not None
+        contribution = record.result.preference_contributions[0]
+        assert contribution.audit_support == ["configured-default:job_title"]
+        assert contribution.job_evidence == []
+
+
+def test_real_jev_adapter_contributes_default_signal_dimensions(tmp_path) -> None:
+    rubric = load_default_rubric()
+    values = {
+        "role_family": "applied AI",
+        "ai_scope": "LLM evaluation",
+        "product_customer_scope": "customers",
+        "ownership_scope": "own launch",
+        "infrastructure_scope": "model serving",
+        "work_arrangement_terms": ["remote"],
+        "compensation_terms": "salary range",
+        "work_authorization_requirement": [],
+        "required_skills": ["Python"],
+        "minimum_experience_years": 3,
+        "applied_ai_requirements": ["evaluation"],
+    }
+    extractor = FakeFactExtractor(
+        outputs=[
+            ExtractedFact(
+                fact_id=fact.id,
+                value=values[fact.id],
+                evidence=["Senior Python Engineer"],
+                provider="fake-facts",
+                model="facts-model-v1",
+            )
+            for fact in rubric.facts
+        ]
+    )
+
+    def respond(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "answers": [
+                    {
+                        "question_id": question.id,
+                        "question_version": question.version,
+                        "noul": 0 if question.id == "pure_infrastructure" else 1,
+                    }
+                    for question in rubric.questions
+                ]
+            },
+        )
+
+    store = LocalStore.open(tmp_path / "jev.sqlite3")
+    store.initialize()
+    store.save_profile(CandidateProfile())
+    store.save_rubric(rubric)
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        service = JobAnalysisService(
+            store,
+            extractor,
+            JevSignalProvider(api_key="test-key", client=client),
+            id_factory=lambda: ANALYSIS_ID,
+        )
+        record = service.analyze_job(JOB_DESCRIPTION)
+
+    assert record.result is not None
+    contributions = {
+        item.subject_id: item for item in record.result.preference_contributions
+    }
+    signal_dimensions = {
+        "applied_ai_depth",
+        "product_customer_proximity",
+        "infrastructure_balance",
+    }
+    assert signal_dimensions <= contributions.keys()
+    assert all(
+        any(ref.startswith("signal:jev:jev-latest:") for ref in item.audit_support)
+        for name, item in contributions.items()
+        if name in signal_dimensions
+    )
+
+
+def test_patch_and_recompute_record_distinct_rubric_revision(tmp_path) -> None:
+    service, store, _, _ = _service(
+        tmp_path, profile=CandidateProfile(), rubric=_rubric()
+    )
+    original = service.analyze_job(JOB_DESCRIPTION)
+    current = apply_rubric_patch(
+        store.load_rubric(),
+        RubricPatch(dimension_updates={"role_fit": {"weight": 2}}),
+    )
+    store.save_rubric(current)
+
+    recomputed = service.recompute_decision(original.id)
+
+    assert original.result is not None and original.trace is not None
+    assert recomputed.result is not None and recomputed.trace is not None
+    assert recomputed.result.rubric_revision == current.revision
+    assert recomputed.trace.rubric_revision == current.revision
+    assert recomputed.result.rubric_revision != original.result.rubric_revision
 
 
 def test_recompute_uses_current_rubric_missing_and_stale_semantics(tmp_path) -> None:
@@ -599,6 +737,7 @@ def test_recompute_rejects_malformed_or_payload_bearing_jd_refs(
         "models",
         "prompt_versions",
         "rubric_version",
+        "rubric_revision",
         "result_version",
         "jd_ref",
         "profile_ref",
@@ -681,6 +820,8 @@ def test_trace_read_rejects_malformed_stored_privacy_or_integrity_data(
         )
     elif corruption == "rubric_version":
         trace = trace.model_copy(update={"rubric_version": "PRIVATE RESUME"})
+    elif corruption == "rubric_revision":
+        trace = trace.model_copy(update={"rubric_revision": "PRIVATE RESUME"})
     elif corruption == "result_version":
         trace = trace.model_copy(update={"result_version": "wrong"})
     elif corruption == "jd_ref":

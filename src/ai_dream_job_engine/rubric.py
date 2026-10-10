@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from importlib.resources import files
+import hashlib
 import json
 import math
 from typing import Any, TypeVar
@@ -27,6 +28,7 @@ def load_default_rubric() -> Rubric:
     """Load and validate the bundled AI-job rubric."""
     template = files("ai_dream_job_engine").joinpath("templates", "ai_job_v1.json")
     rubric = Rubric.model_validate_json(template.read_text(encoding="utf-8"))
+    rubric = rubric.model_copy(update={"revision": rubric_revision(rubric)})
     _validate_rubric(rubric)
     return rubric
 
@@ -56,8 +58,18 @@ def apply_rubric_patch(rubric: Rubric, patch: RubricPatch) -> Rubric:
         questions=questions,
         recommendation_thresholds=thresholds,
     )
+    updated = updated.model_copy(update={"revision": rubric_revision(updated)})
     _validate_rubric(updated)
     return updated
+
+
+def rubric_revision(rubric: Rubric) -> str:
+    """Return the immutable digest of the rubric's semantic content."""
+    payload = rubric.model_dump(mode="json", exclude={"revision"})
+    encoded = json.dumps(
+        payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode()
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
 def _apply_updates(

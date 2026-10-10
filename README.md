@@ -73,7 +73,7 @@ The engine distinguishes public job evidence, user-confirmed candidate claims, a
 
 Data classes are `public_job_data`, `selected_candidate_claims`, and `restricted_personal_data`. Outbound disclosures identify provider, purpose, fields, data class, and confirmation state. Public JD text is the only default external-model payload. Restricted personal data is not sent by the implemented provider flow.
 
-Local profiles, rubrics, and analysis records default to `.data/ai-dream-job-engine.sqlite3` in the project root. Set `AI_DREAM_JOB_DATA_PATH` to override that location. Private evaluation cases belong under `eval/private/`, generated private reports under `eval/reports/`, and local MCP state under `local-mcp-data/`; these paths are ignored by Git. There is no telemetry.
+Local profiles, rubrics, and analysis records use the user data directory by default. On macOS the database is `~/Library/Application Support/ai-dream-job-engine/ai-dream-job-engine.sqlite3`; elsewhere it uses `$XDG_DATA_HOME/ai-dream-job-engine/ai-dream-job-engine.sqlite3`, or `~/.local/share/ai-dream-job-engine/ai-dream-job-engine.sqlite3` when `XDG_DATA_HOME` is unset. Set `AI_DREAM_JOB_DATA_PATH` to override that location. Private evaluation cases belong under `eval/private/`, generated private reports under `eval/reports/`, and local MCP state under `local-mcp-data/`; these paths are ignored by Git. There is no telemetry.
 
 ## Evaluation method
 
@@ -83,7 +83,7 @@ Automated fields are recommendation **agreement**, blocker precision with `null`
 
 Top-five jobs are the first `min(5, completed)` after sorting by recommendation tier (`priority_apply`, `apply_after_review`, `hold`, `skip`), then descending preference score, descending qualification score, and stable case ID. `top_five_usefulness` is populated only when every selected job has explicit post-review usefulness; `review_time_seconds` likewise comes only from explicit human review input. Partial reports are written atomically before the CLI exits nonzero.
 
-The unsupported-source audit counts known facts without evidence; available signals missing provider, model, question ID, or question version; gaps without evidence unless `missing_evidence` is explicit; and contributions without evidence. Signal probabilities do not require JD quotes. Candidate raw claims are intentionally absent from the privacy-safe `AnalysisRecord`, so this audit cannot inspect their raw source content.
+The unsupported-source audit counts known facts without evidence; available signals missing provider, model, question ID, or question version; gaps without evidence unless `missing_evidence` is explicit; and contributions without source evidence or explicit audit support. Signal probabilities do not require JD quotes. Candidate raw claims are intentionally absent from the privacy-safe `AnalysisRecord`, so this audit cannot inspect their raw source content.
 
 These are descriptive review signals, not statistical accuracy estimates. The committed cases are synthetic and only exercise the offline path. See [eval/README.md](eval/README.md) for the private 20-JD protocol. That real evaluation has not been completed and no real JD dataset is included.
 

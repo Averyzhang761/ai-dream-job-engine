@@ -12,6 +12,7 @@ from ai_dream_job_engine.mcp_server import (
     LocalProfileApplication,
     LocalRubricApplication,
     MCPServices,
+    _default_database_path,
     build_server,
 )
 from ai_dream_job_engine.models import (
@@ -99,7 +100,76 @@ def _resume_candidate(candidate_id, claim_type, value):
         claim_type=claim_type,
         value=value,
         source=ClaimSource.RESUME_EVIDENCE,
+        source_quote=f"Resume evidence for {candidate_id}",
     )
+
+
+def test_profile_initialization_rejects_claims_and_resume_confirmation_needs_preview() -> None:
+    store = MemoryStore()
+    application = LocalProfileApplication(store)
+    forged = _resume_candidate("resume-1", "skill", "Python").model_copy(
+        update={"confirmed": True}
+    )
+
+    with pytest.raises(ApplicationError, match="invalid_claim_decisions"):
+        application.initialize_profile(CandidateProfile(claims=[forged]))
+
+    initialized = application.initialize_profile(CandidateProfile())
+    assert initialized.claims == []
+    proposal = _resume_candidate("resume-1", "skill", "Python").model_copy(
+        update={"source_quote": "Built Python services."}
+    )
+    issued = application.review_profile_claims([proposal])
+
+    with pytest.raises(ApplicationError, match="profile_preview_invalid"):
+        application.confirm_profile_claims(
+            "forged-preview", [ClaimDecision(claim_id="resume-1", action="accept")]
+        )
+
+    confirmed = application.confirm_profile_claims(
+        issued.preview_id, [ClaimDecision(claim_id="resume-1", action="accept")]
+    )
+    assert any(claim.confirmed and claim.value == "Python" for claim in confirmed.claims)
+
+
+@pytest.mark.asyncio
+async def test_mcp_profile_claims_require_server_preview_and_per_claim_decisions() -> None:
+    application = LocalProfileApplication(MemoryStore())
+    server = _profile_server(application)
+    forged = _resume_candidate("resume-1", "skill", "Python").model_copy(
+        update={"confirmed": True}
+    )
+
+    with pytest.raises(ToolError, match="invalid_claim_decisions"):
+        await server.call_tool(
+            "initialize_profile",
+            {"profile": CandidateProfile(claims=[forged]).model_dump(mode="json")},
+        )
+
+    initialized = await server.call_tool("initialize_profile", {})
+    assert initialized.structured_content["claims"] == []
+    pending = _resume_candidate("resume-1", "skill", "Python")
+    issued = await server.call_tool(
+        "review_profile_claims",
+        {"proposals": [pending.model_dump(mode="json")]},
+    )
+    preview_id = issued.structured_content["preview_id"]
+    confirmed = await server.call_tool(
+        "confirm_profile_claims",
+        {
+            "preview_id": preview_id,
+            "decisions": [{"claim_id": "resume-1", "action": "accept"}],
+        },
+    )
+
+    assert any(item["confirmed"] for item in confirmed.structured_content["claims"])
+
+
+def test_explicit_database_path_override_is_preserved(monkeypatch, tmp_path) -> None:
+    configured = tmp_path / "custom" / "state.sqlite3"
+    monkeypatch.setenv("AI_DREAM_JOB_DATA_PATH", str(configured))
+
+    assert _default_database_path() == configured
 
 
 def _profile_server(profile_application):
@@ -194,25 +264,27 @@ def test_profile_read_transform_save_operations_are_serialized() -> None:
                 assert self.release_first_save.wait(2)
             super().save_profile(profile)
 
-    profile = CandidateProfile(
-        claims=[
-            _resume_candidate("claim-a", "skill", "Python"),
-            _resume_candidate("claim-b", "location", "Remote"),
-        ]
-    )
-    store = BlockingFirstSaveStore(profile=profile)
+    store = BlockingFirstSaveStore(profile=CandidateProfile())
     application = LocalProfileApplication(store)
+    first_preview = application.review_profile_claims(
+        [_resume_candidate("claim-a", "skill", "Python")]
+    )
     second_started = threading.Event()
 
     def confirm_second():
         second_started.set()
+        preview = application.review_profile_claims(
+            [_resume_candidate("claim-b", "location", "Remote")]
+        )
         return application.confirm_profile_claims(
+            preview.preview_id,
             [ClaimDecision(claim_id="claim-b", action="accept")]
         )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         first = executor.submit(
             application.confirm_profile_claims,
+            first_preview.preview_id,
             [ClaimDecision(claim_id="claim-a", action="accept")],
         )
         assert store.first_save_started.wait(2)
@@ -407,27 +479,29 @@ async def test_public_errors_are_fixed_and_do_not_leak_context(monkeypatch) -> N
     server = _profile_server(empty_profile)
 
     with pytest.raises(ToolError) as missing:
-        await server.call_tool("review_profile_claims", {})
+        await server.call_tool("review_profile_claims", {"proposals": []})
     _assert_safe_error(
         missing.value,
         "profile_not_initialized",
         "Initialize the candidate profile before this action.",
     )
 
-    empty_profile.initialize_profile(
-        CandidateProfile(
-            claims=[_resume_candidate("private-claim-id", "skill", "secret-value")]
-        )
+    empty_profile.initialize_profile(CandidateProfile())
+    issued = empty_profile.review_profile_claims(
+        [_resume_candidate("private-claim-id", "skill", "secret-value")]
     )
     with pytest.raises(ToolError) as decisions:
         await server.call_tool(
             "confirm_profile_claims",
-            {"decisions": [{"claim_id": "unknown-private-id", "action": "accept"}]},
+            {
+                "preview_id": issued.preview_id,
+                "decisions": [{"claim_id": "unknown-private-id", "action": "accept"}],
+            },
         )
     _assert_safe_error(
         decisions.value,
-        "invalid_claim_decisions",
-        "Review the claim decisions and submit valid per-claim actions.",
+        "profile_preview_invalid",
+        "Review pending resume claims before confirming them.",
         "unknown-private-id",
     )
 

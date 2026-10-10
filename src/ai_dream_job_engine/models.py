@@ -128,7 +128,13 @@ class FactDefinition(DomainModel):
     missing_policy: Literal["unknown", "default"] = "unknown"
     default_value: Any | None = None
     enum_values: list[str] = Field(default_factory=list)
-    candidate_comparison: Literal["none", "exact", "allowed_alternatives"] = "none"
+    candidate_comparison: Literal[
+        "none",
+        "exact",
+        "allowed_alternatives",
+        "required_subset",
+        "candidate_at_least",
+    ] = "none"
     qualification_weight: float = Field(default=0, ge=0)
 
     @model_validator(mode="after")
@@ -143,11 +149,18 @@ class FactDefinition(DomainModel):
             raise ValueError(
                 "qualification_weight must be positive for candidate comparison"
             )
+        if self.candidate_comparison in {
+            "allowed_alternatives",
+            "required_subset",
+        } and self.data_type is not FactDataType.LIST:
+            raise ValueError(
+                f"{self.candidate_comparison} requires list data_type"
+            )
         if (
-            self.candidate_comparison == "allowed_alternatives"
-            and self.data_type is not FactDataType.LIST
+            self.candidate_comparison == "candidate_at_least"
+            and self.data_type is not FactDataType.NUMBER
         ):
-            raise ValueError("allowed_alternatives requires list data_type")
+            raise ValueError("candidate_at_least requires number data_type")
         return self
 
 
@@ -176,6 +189,7 @@ class DecisionQuestion(DomainModel):
 class Rubric(DomainModel):
     id: str = "default"
     version: str = Field(min_length=1)
+    revision: str = ""
     facts: list[FactDefinition] = Field(default_factory=list)
     dimensions: list[ValueDimension] = Field(default_factory=list)
     questions: list[DecisionQuestion] = Field(default_factory=list)
@@ -275,11 +289,12 @@ class DecisionContribution(DomainModel):
     input_ids: list[str] = Field(min_length=1)
     job_evidence: list[str] = Field(default_factory=list)
     candidate_evidence: list[str] = Field(default_factory=list)
+    audit_support: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def has_source_evidence(self) -> DecisionContribution:
-        if not self.job_evidence and not self.candidate_evidence:
-            raise ValueError("every contribution requires evidence")
+        if not self.job_evidence and not self.candidate_evidence and not self.audit_support:
+            raise ValueError("every contribution requires evidence or audit support")
         return self
 
 
@@ -293,6 +308,7 @@ class DecisionResult(DomainModel):
         default_factory=list
     )
     rubric_version: str = Field(min_length=1)
+    rubric_revision: str = Field(default="unversioned", min_length=1)
     prompt_version: str | None = None
     model_versions: dict[str, str] = Field(default_factory=dict)
     result_version: str = "1"
@@ -361,6 +377,7 @@ class DecisionTrace(DomainModel):
     providers: dict[str, str] = Field(default_factory=dict)
     model_versions: dict[str, str] = Field(default_factory=dict)
     rubric_version: str = Field(min_length=1)
+    rubric_revision: str = Field(default="unversioned", min_length=1)
     prompt_versions: dict[str, str] = Field(default_factory=dict)
     question_versions: dict[str, str] = Field(default_factory=dict)
     result_version: str = Field(min_length=1)

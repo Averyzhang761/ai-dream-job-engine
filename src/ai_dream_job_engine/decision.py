@@ -23,7 +23,7 @@ from ai_dream_job_engine.models import (
     SignalStatus,
     ValueDimension,
 )
-from ai_dream_job_engine.rubric import _validate_rubric
+from ai_dream_job_engine.rubric import _validate_rubric, rubric_revision
 
 
 _ACTIVE_SOURCES = {ClaimSource.RESUME_EVIDENCE, ClaimSource.USER_CONFIRMED}
@@ -36,6 +36,7 @@ class _Value:
     id: str
     value: Any
     evidence: tuple[str, ...]
+    audit_support: tuple[str, ...]
     missing_evidence: bool
 
     @property
@@ -89,6 +90,7 @@ def decide_job(
         preference_contributions=preference,
         qualification_contributions=qualification,
         rubric_version=rubric.version,
+        rubric_revision=rubric_revision(rubric),
         needs_review=(
             recommendation is RecommendationLevel.APPLY_AFTER_REVIEW
             or any(gap.kind is GapKind.EVIDENCE_GAP for gap in gaps)
@@ -141,31 +143,51 @@ def _normalize(
 
 def _normalize_fact(definition: FactDefinition, fact: ExtractedFact | None) -> _Value:
     if fact is None:
-        return _Value(definition.id, _UNRESOLVED, (), True)
+        return _default_or_unresolved(definition)
     evidence = tuple(sorted(fact.evidence))
     if fact.is_unknown:
-        return _Value(fact.fact_id, _UNRESOLVED, evidence, not evidence)
+        if definition.missing_policy == "default":
+            return _default_or_unresolved(definition)
+        return _Value(fact.fact_id, _UNRESOLVED, evidence, (), not evidence)
     value = _typed(definition, fact.value, "fact")
     return _normalized_value(fact.fact_id, value, evidence)
 
 
 def _normalize_signal(question_id: str, version: str, signal: DecisionSignal | None) -> _Value:
     if signal is None:
-        return _Value(question_id, _UNRESOLVED, (), True)
+        return _Value(question_id, _UNRESOLVED, (), (), True)
     evidence = tuple(sorted(signal.evidence))
+    audit_support = (
+        (f"signal:{signal.provider}:{signal.model}:{question_id}:{version}",)
+        if signal.provider and signal.model
+        else ()
+    )
     valid = (
         signal.status is SignalStatus.AVAILABLE
         and signal.question_version == version
-        and bool(evidence)
+        and bool(evidence or audit_support)
     )
     value = signal.probability if valid else _UNRESOLVED
-    return _Value(signal.question_id, value, evidence, not evidence)
+    return _Value(signal.question_id, value, evidence, audit_support, not evidence)
 
 
 def _normalized_value(input_id: str, value: Any, evidence: tuple[str, ...]) -> _Value:
     if _unknown(value) or not evidence:
         value = _UNRESOLVED
-    return _Value(input_id, value, evidence, not evidence)
+    return _Value(input_id, value, evidence, (), not evidence)
+
+
+def _default_or_unresolved(definition: FactDefinition) -> _Value:
+    if definition.missing_policy != "default":
+        return _Value(definition.id, _UNRESOLVED, (), (), True)
+    value = _typed(definition, definition.default_value, "configured default")
+    return _Value(
+        definition.id,
+        value,
+        (),
+        (f"configured-default:{definition.id}",),
+        False,
+    )
 
 
 def _typed(definition: FactDefinition, value: Any, source: str) -> Any:
@@ -177,8 +199,6 @@ def _typed(definition: FactDefinition, value: Any, source: str) -> Any:
     if definition.data_type is FactDataType.NUMBER:
         if type(value) not in (int, float) or not math.isfinite(value):
             raise ValueError(f"{label} must be a finite number")
-        if not 0 <= value <= 1:
-            raise ValueError(f"{label} must be between 0 and 1")
         return float(value)
     if definition.data_type in {FactDataType.TEXT, FactDataType.ENUM}:
         if not isinstance(value, str):
@@ -231,6 +251,7 @@ def _preference(inputs: _Inputs, rubric: Rubric) -> tuple[list[DecisionContribut
                 weight=dimension.weight,
                 input_ids=sorted(value.id for value in values),
                 job_evidence=_evidence(values),
+                audit_support=_audit_support(values),
             )
         )
     return contributions, _sort_gaps(gaps)
@@ -278,6 +299,7 @@ def _qualification(
                     weight=definition.qualification_weight,
                     input_ids=[fact.id],
                     job_evidence=list(fact.evidence),
+                    audit_support=list(fact.audit_support),
                 )
             )
             continue
@@ -336,6 +358,12 @@ def _compatible(required: Any, candidate: Any, policy: str) -> bool:
         required_set = {item.casefold() for item in required}
         candidate_set = {item.casefold() for item in candidate}
         return not required_set or bool(required_set & candidate_set)
+    if policy == "required_subset":
+        required_set = {item.casefold() for item in required}
+        candidate_set = {item.casefold() for item in candidate}
+        return required_set.issubset(candidate_set)
+    if policy == "candidate_at_least":
+        return candidate >= required
     if isinstance(required, tuple):
         return tuple(item.casefold() for item in required) == tuple(
             item.casefold() for item in candidate
@@ -355,6 +383,7 @@ def _qualification_contribution(
         input_ids=sorted([fact.id, claim.id]),
         job_evidence=list(fact.evidence),
         candidate_evidence=list(claim.evidence),
+        audit_support=sorted({*fact.audit_support, *claim.audit_support}),
     )
 
 
@@ -388,6 +417,10 @@ def _preference_gap(contributions: list[DecisionContribution]) -> Gap:
 
 def _evidence(values: Iterable[_Value]) -> list[str]:
     return sorted({item for value in values for item in value.evidence})
+
+
+def _audit_support(values: Iterable[_Value]) -> list[str]:
+    return sorted({item for value in values for item in value.audit_support})
 
 
 def _weighted(contributions: list[DecisionContribution]) -> float | None:

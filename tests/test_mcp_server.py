@@ -26,14 +26,14 @@ EXPECTED_TOOLS = {
 
 
 class FakeProfileService:
-    def initialize_profile(self, profile):
-        return profile
+    def initialize_profile(self, profile=None):
+        return profile or CandidateProfile()
 
-    def review_profile_claims(self):
-        return CandidateProfile()
+    def review_profile_claims(self, proposals):
+        raise AssertionError("not used")
 
-    def confirm_profile_claims(self, decisions):
-        return CandidateProfile()
+    def confirm_profile_claims(self, preview_id, decisions):
+        raise AssertionError("not used")
 
     def preview_agent_memory_import(self, source_agent, scope, candidates):
         raise AssertionError("not used")
@@ -100,6 +100,7 @@ async def test_tool_schemas_use_domain_contracts() -> None:
     rubric_schema = tools["update_rubric"].input_schema
     assert "CandidateProfile" in initialize_schema["$defs"]
     assert "ClaimDecision" in confirm_schema["$defs"]
+    assert set(confirm_schema["required"]) == {"preview_id", "decisions"}
     assert "RubricPatch" in rubric_schema["$defs"]
 
 

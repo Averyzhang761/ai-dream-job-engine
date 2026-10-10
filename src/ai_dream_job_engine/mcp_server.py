@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import secrets
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock, RLock
@@ -68,6 +69,10 @@ PROFILE_NOT_INITIALIZED = (
 MEMORY_PREVIEW_INVALID = (
     "memory_preview_invalid",
     "Request a new memory preview before confirming claims.",
+)
+PROFILE_PREVIEW_INVALID = (
+    "profile_preview_invalid",
+    "Review pending resume claims before confirming them.",
 )
 INVALID_CLAIM_DECISIONS = (
     "invalid_claim_decisions",
@@ -132,6 +137,11 @@ class IssuedMemoryImportPreview(BaseModel):
     preview: MemoryImportPreview
 
 
+class IssuedProfileClaimsPreview(BaseModel):
+    preview_id: str = Field(min_length=32)
+    candidates: list[CandidateClaim]
+
+
 @dataclass(frozen=True)
 class _RegisteredPreview:
     profile_digest: str
@@ -139,13 +149,24 @@ class _RegisteredPreview:
     preview: MemoryImportPreview
 
 
-class ProfileApplication(Protocol):
-    def initialize_profile(self, profile: CandidateProfile) -> CandidateProfile: ...
+@dataclass(frozen=True)
+class _RegisteredProfilePreview:
+    profile_digest: str
+    binding_digest: str
+    candidates: tuple[CandidateClaim, ...]
 
-    def review_profile_claims(self) -> CandidateProfile: ...
+
+class ProfileApplication(Protocol):
+    def initialize_profile(
+        self, profile: CandidateProfile | None = None
+    ) -> CandidateProfile: ...
+
+    def review_profile_claims(
+        self, proposals: list[CandidateClaim]
+    ) -> IssuedProfileClaimsPreview: ...
 
     def confirm_profile_claims(
-        self, decisions: list[ClaimDecision]
+        self, preview_id: str, decisions: list[ClaimDecision]
     ) -> CandidateProfile: ...
 
     def preview_agent_memory_import(
@@ -234,25 +255,70 @@ class LocalProfileApplication:
         self._store = store
         self._lock = RLock()
         self._previews: dict[str, _RegisteredPreview] = {}
+        self._profile_previews: dict[str, _RegisteredProfilePreview] = {}
 
-    def initialize_profile(self, profile: CandidateProfile) -> CandidateProfile:
-        with self._lock:
-            self._save_profile(profile)
-            return profile
-
-    def review_profile_claims(self) -> CandidateProfile:
-        with self._lock:
-            return self._profile()
-
-    def confirm_profile_claims(
-        self, decisions: list[ClaimDecision]
+    def initialize_profile(
+        self, profile: CandidateProfile | None = None
     ) -> CandidateProfile:
         with self._lock:
+            requested = profile or CandidateProfile()
+            if requested.claims or requested.import_receipts:
+                raise ApplicationError(INVALID_CLAIM_DECISIONS)
+            empty = requested.model_copy(
+                update={"claims": [], "import_receipts": []}, deep=True
+            )
+            self._save_profile(empty)
+            self._previews.clear()
+            self._profile_previews.clear()
+            return empty
+
+    def review_profile_claims(
+        self, proposals: list[CandidateClaim]
+    ) -> IssuedProfileClaimsPreview:
+        with self._lock:
+            profile = self._profile()
             try:
-                updated = confirm_claims(self._profile(), decisions)
+                _validate_resume_proposals(proposals)
+            except ValueError:
+                raise ApplicationError(PROFILE_PREVIEW_INVALID) from None
+            preview_id = self._new_preview_id()
+            candidates = tuple(item.model_copy(deep=True) for item in proposals)
+            self._profile_previews[preview_id] = _RegisteredProfilePreview(
+                profile_digest=_model_digest(profile),
+                binding_digest=_profile_preview_digest(profile, candidates),
+                candidates=candidates,
+            )
+            return IssuedProfileClaimsPreview(
+                preview_id=preview_id,
+                candidates=[item.model_copy(deep=True) for item in candidates],
+            )
+
+    def confirm_profile_claims(
+        self, preview_id: str, decisions: list[ClaimDecision]
+    ) -> CandidateProfile:
+        with self._lock:
+            issued = self._profile_previews.get(preview_id)
+            if issued is None:
+                raise ApplicationError(PROFILE_PREVIEW_INVALID)
+            profile = self._profile()
+            if (
+                _model_digest(profile) != issued.profile_digest
+                or _profile_preview_digest(profile, issued.candidates)
+                != issued.binding_digest
+                or {item.claim_id for item in decisions}
+                != {item.id for item in issued.candidates}
+            ):
+                raise ApplicationError(PROFILE_PREVIEW_INVALID)
+            try:
+                staged = profile.model_copy(
+                    update={"claims": [*profile.claims, *issued.candidates]},
+                    deep=True,
+                )
+                updated = confirm_claims(staged, decisions)
             except ValueError:
                 raise ApplicationError(INVALID_CLAIM_DECISIONS) from None
             self._save_profile(updated)
+            del self._profile_previews[preview_id]
             return updated
 
     def preview_agent_memory_import(
@@ -484,12 +550,50 @@ def _preview_binding_digest(
     return hashlib.sha256(payload).hexdigest()
 
 
+def _validate_resume_proposals(proposals: list[CandidateClaim]) -> None:
+    ids = [item.id for item in proposals]
+    if len(ids) != len(set(ids)):
+        raise ValueError("duplicate resume proposal IDs")
+    for proposal in proposals:
+        if (
+            proposal.source.value != "resume_evidence"
+            or proposal.confirmed
+            or not proposal.source_quote
+            or proposal.import_origin is not None
+            or proposal.source_agent is not None
+        ):
+            raise ValueError("resume proposals must be pending quoted resume evidence")
+
+
+def _profile_preview_digest(
+    profile: CandidateProfile, candidates: tuple[CandidateClaim, ...]
+) -> str:
+    payload = json.dumps(
+        {
+            "profile": profile.model_dump(mode="json"),
+            "candidates": [item.model_dump(mode="json") for item in candidates],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
 def _default_database_path() -> Path:
     configured_path = os.getenv(_DATA_PATH_ENV)
     if configured_path:
         return Path(configured_path).expanduser()
-    project_root = Path(__file__).resolve().parents[2]
-    return project_root / ".data" / "ai-dream-job-engine.sqlite3"
+    if sys.platform == "darwin":
+        data_root = Path.home() / "Library" / "Application Support"
+    else:
+        configured_root = os.getenv("XDG_DATA_HOME")
+        data_root = (
+            Path(configured_root).expanduser()
+            if configured_root
+            else Path.home() / ".local" / "share"
+        )
+    return data_root / "ai-dream-job-engine" / "ai-dream-job-engine.sqlite3"
 
 
 def default_services() -> MCPServices:
@@ -552,24 +656,33 @@ def build_server(services: MCPServices | None = None) -> MCPServer:
     )
 
     @server.tool()
-    def initialize_profile(profile: CandidateProfile) -> CandidateProfile:
-        """Initialize the local candidate profile from host-supplied claims."""
+    def initialize_profile(
+        profile: CandidateProfile | None = None,
+    ) -> CandidateProfile:
+        """Initialize an empty local candidate profile."""
         return _call_safely(
             lambda: applications.profile.initialize_profile(profile),
         )
 
     @server.tool()
-    def review_profile_claims() -> CandidateProfile:
-        """Review current claims before confirming or editing them."""
-        return _call_safely(applications.profile.review_profile_claims)
+    def review_profile_claims(
+        proposals: list[CandidateClaim],
+    ) -> IssuedProfileClaimsPreview:
+        """Issue a bound preview for pending host-supplied resume claims."""
+        return _call_safely(
+            lambda: applications.profile.review_profile_claims(proposals)
+        )
 
     @server.tool()
     def confirm_profile_claims(
+        preview_id: NonEmptyString,
         decisions: list[ClaimDecision],
     ) -> CandidateProfile:
-        """Apply explicit per-claim user decisions."""
+        """Apply per-claim decisions to a server-issued resume preview."""
         return _call_safely(
-            lambda: applications.profile.confirm_profile_claims(decisions),
+            lambda: applications.profile.confirm_profile_claims(
+                preview_id, decisions
+            ),
         )
 
     @server.tool()

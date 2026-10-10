@@ -75,6 +75,25 @@ def test_patch_can_change_weight_and_threshold() -> None:
     ).weight != 2.5
 
 
+def test_semantic_patch_changes_revision_and_noop_is_stable() -> None:
+    rubric = load_default_rubric()
+
+    unchanged = apply_rubric_patch(rubric, RubricPatch())
+    changed = apply_rubric_patch(
+        rubric,
+        RubricPatch(dimension_updates={"applied_ai_depth": {"weight": 2.5}}),
+    )
+    repeated = apply_rubric_patch(
+        rubric,
+        RubricPatch(dimension_updates={"applied_ai_depth": {"weight": 2.5}}),
+    )
+
+    assert rubric.revision
+    assert unchanged.revision == rubric.revision
+    assert changed.revision != rubric.revision
+    assert repeated.revision == changed.revision
+
+
 @pytest.mark.parametrize(
     "updates",
     [
@@ -193,6 +212,62 @@ def test_built_wheel_contains_template_and_loads_outside_checkout(
     )
 
     assert result.stdout.strip() == "ai-job-v1"
+
+
+def test_installed_wheel_stateful_tool_uses_user_data_path(tmp_path: Path) -> None:
+    wheel_dir = tmp_path / "wheel"
+    wheel_dir.mkdir()
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "wheel",
+            ".",
+            "--no-deps",
+            "--no-build-isolation",
+            "--wheel-dir",
+            str(wheel_dir),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    installed = tmp_path / "installed"
+    with zipfile.ZipFile(next(wheel_dir.glob("*.whl"))) as archive:
+        archive.extractall(installed)
+    home = tmp_path / "home"
+    xdg = tmp_path / "xdg"
+    environment = os.environ.copy()
+    environment.update(
+        {"PYTHONPATH": str(installed), "HOME": str(home), "XDG_DATA_HOME": str(xdg)}
+    )
+    environment.pop("AI_DREAM_JOB_DATA_PATH", None)
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import asyncio; "
+                "from ai_dream_job_engine.mcp_server import build_server; "
+                "asyncio.run(build_server().call_tool('initialize_profile', {}))"
+            ),
+        ],
+        cwd=tmp_path,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    expected_root = (
+        home / "Library" / "Application Support"
+        if sys.platform == "darwin"
+        else xdg
+    )
+    database = expected_root / "ai-dream-job-engine" / "ai-dream-job-engine.sqlite3"
+
+    assert database.is_file()
+    assert not list(installed.rglob("*.sqlite3"))
 
 
 @pytest.mark.parametrize("default_value", [lambda: None, CustomDefault()])

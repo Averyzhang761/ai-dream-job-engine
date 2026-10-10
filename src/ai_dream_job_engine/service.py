@@ -31,6 +31,7 @@ from ai_dream_job_engine.providers.base import (
     DecisionSignalProvider,
     JobFactExtractor,
 )
+from ai_dream_job_engine.rubric import rubric_revision
 
 
 _FAILURE_CATEGORY = "analysis_failed"
@@ -224,6 +225,9 @@ class _PersistedRecordSafety:
             raise ValueError("trace rubric stale")
         if result.rubric_version != self.rubric.version:
             raise ValueError("result rubric stale")
+        revision = rubric_revision(self.rubric)
+        if trace.rubric_revision != revision or result.rubric_revision != revision:
+            raise ValueError("rubric revision stale")
 
     def _jd_ref(self, start: int, end: int, value: str) -> str:
         ref = (
@@ -629,6 +633,7 @@ def _trace(
         providers=metadata["providers"],
         model_versions=metadata["models"],
         rubric_version=rubric.version,
+        rubric_revision=rubric_revision(rubric),
         prompt_versions=metadata["prompts"],
         question_versions=surface.question_versions,
         result_version=result.result_version,
@@ -779,6 +784,8 @@ def _validate_stored_record(record: AnalysisRecord) -> None:
         raise ValueError("stored result version mismatch")
     if result.rubric_version != trace.rubric_version:
         raise ValueError("stored rubric versions mismatch")
+    if result.rubric_revision != trace.rubric_revision:
+        raise ValueError("stored rubric revisions mismatch")
     expected_prompt_version = ";".join(
         f"{key}:{value}" for key, value in sorted(trace.prompt_versions.items())
     )

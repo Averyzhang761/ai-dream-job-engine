@@ -325,10 +325,10 @@ def test_unsupported_source_audit_counts_each_defined_class() -> None:
         missing_evidence=True,
     )
     unsupported_contribution = SimpleNamespace(
-        job_evidence=[], candidate_evidence=[]
+        job_evidence=[], candidate_evidence=[], audit_support=[]
     )
     supported_contribution = SimpleNamespace(
-        job_evidence=["jd-ref"], candidate_evidence=[]
+        job_evidence=[], candidate_evidence=[], audit_support=["configured-default:fact"]
     )
     record = SimpleNamespace(
         facts=[
@@ -537,7 +537,8 @@ def test_readme_documents_clean_startup_and_local_database_path() -> None:
     eval_readme = (ROOT / "eval" / "README.md").read_text(encoding="utf-8")
 
     assert "python -m ai_dream_job_engine.mcp_server" in readme
-    assert ".data/ai-dream-job-engine.sqlite3" in readme
+    assert "~/Library/Application Support/ai-dream-job-engine" in readme
+    assert "XDG_DATA_HOME" in readme
     assert "AI_DREAM_JOB_DATA_PATH" in readme
     assert "rerun_failed_count" in readme
     assert "system_preference_score" in eval_readme
