@@ -405,6 +405,8 @@ class EvaluationCase(DomainModel):
     human_gap_labels: list[GapKind]
     system_recommendation: RecommendationLevel | None = None
     system_gap_labels: list[GapKind] | None = None
+    system_preference_score: float | None = Field(default=None, ge=0, le=1)
+    system_qualification_score: float | None = Field(default=None, ge=0, le=1)
     human_top_five_usefulness: float | None = Field(default=None, ge=0, le=1)
     human_review_time_seconds: float | None = Field(default=None, ge=0)
     notes: str | None = None
@@ -415,19 +417,28 @@ class EvaluationReport(DomainModel):
     attempted_count: int = Field(ge=0)
     completed_count: int = Field(ge=0)
     failed_count: int = Field(ge=0)
+    rerun_attempted_count: int = Field(ge=0)
+    rerun_completed_count: int = Field(ge=0)
+    rerun_failed_count: int = Field(ge=0)
     run_complete: bool
     recommendation_agreement: float | None = Field(default=None, ge=0, le=1)
     blocker_precision: float | None = Field(ge=0, le=1)
     gap_type_confusion_counts: dict[
         str, dict[str, Annotated[int, Field(ge=0)]]
     ]
+    unsupported_fact_count: int = Field(ge=0)
+    unsupported_signal_count: int = Field(ge=0)
+    unsupported_gap_count: int = Field(ge=0)
+    unsupported_contribution_count: int = Field(ge=0)
     unsupported_claim_count: int = Field(ge=0)
     rerun_stability: float | None = Field(default=None, ge=0, le=1)
-    top_five_gap_label_agreement: float | None = Field(default=None, ge=0, le=1)
+    gap_label_agreement: float | None = Field(default=None, ge=0, le=1)
+    top_five_case_ids: list[str] = Field(default_factory=list, max_length=5)
     evaluation_runtime_seconds: float = Field(ge=0)
     top_five_usefulness: float | None = Field(default=None, ge=0, le=1)
     review_time_seconds: float | None = Field(default=None, ge=0)
     failure_case_ids: list[str] = Field(default_factory=list)
+    rerun_failure_case_ids: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def run_counts_are_consistent(self) -> EvaluationReport:
@@ -435,6 +446,25 @@ class EvaluationReport(DomainModel):
             raise ValueError("attempted count must match report cases")
         if self.completed_count + self.failed_count != self.attempted_count:
             raise ValueError("completed and failed counts must match attempted count")
-        if self.run_complete != (self.failed_count == 0):
-            raise ValueError("run_complete must reflect failed count")
+        if self.rerun_attempted_count != self.completed_count:
+            raise ValueError("every completed first run requires a rerun")
+        if (
+            self.rerun_completed_count + self.rerun_failed_count
+            != self.rerun_attempted_count
+        ):
+            raise ValueError("rerun completed and failed counts must match attempts")
+        if self.run_complete != (
+            self.failed_count == 0 and self.rerun_failed_count == 0
+        ):
+            raise ValueError("run_complete must reflect first-run and rerun failures")
+        unsupported_total = (
+            self.unsupported_fact_count
+            + self.unsupported_signal_count
+            + self.unsupported_gap_count
+            + self.unsupported_contribution_count
+        )
+        if self.unsupported_claim_count != unsupported_total:
+            raise ValueError("unsupported total must match its class counts")
+        if len(self.top_five_case_ids) != min(5, self.completed_count):
+            raise ValueError("top-five IDs must match completed case count")
         return self

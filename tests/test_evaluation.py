@@ -36,6 +36,8 @@ def _record(
     gaps: list[GapKind],
     *,
     unsupported_claims: int = 0,
+    preference_score: float | None = 0.5,
+    qualification_score: float | None = 0.5,
 ) -> SimpleNamespace:
     result_gaps = [
         SimpleNamespace(
@@ -47,7 +49,14 @@ def _record(
         for index, kind in enumerate(gaps)
     ]
     return SimpleNamespace(
-        result=SimpleNamespace(recommendation=recommendation, gaps=result_gaps),
+        result=SimpleNamespace(
+            recommendation=recommendation,
+            gaps=result_gaps,
+            preference_score=preference_score,
+            qualification_score=qualification_score,
+            preference_contributions=[],
+            qualification_contributions=[],
+        ),
         facts=[],
         signals=[],
     )
@@ -82,6 +91,10 @@ def test_case_requires_human_judgment_before_system_result() -> None:
 
     with pytest.raises(ValueError, match="pre-populated system result"):
         run_evaluation([contaminated], service)
+
+    contaminated_score = _case(system_preference_score=0.9)
+    with pytest.raises(ValueError, match="pre-populated system result"):
+        run_evaluation([contaminated_score], service)
 
     clean = _case()
     before = clean.model_dump(mode="json")
@@ -194,7 +207,7 @@ def test_human_review_metrics_are_optional_and_never_inferred() -> None:
     )
     unreviewed = run_evaluation([_case()], SequenceService([record, record]))
 
-    assert unreviewed.top_five_gap_label_agreement == 1.0
+    assert unreviewed.gap_label_agreement == 1.0
     assert unreviewed.evaluation_runtime_seconds >= 0
     assert unreviewed.top_five_usefulness is None
     assert unreviewed.review_time_seconds is None
@@ -216,6 +229,148 @@ def test_human_review_metrics_are_optional_and_never_inferred() -> None:
     )
     assert reviewed.top_five_usefulness == 0.75
     assert reviewed.review_time_seconds == 75
+
+
+def test_rerun_failure_marks_run_incomplete_but_preserves_first_pass() -> None:
+    first = _record(
+        RecommendationLevel.APPLY_AFTER_REVIEW,
+        [GapKind.EVIDENCE_GAP],
+        preference_score=0.8,
+        qualification_score=0.7,
+    )
+    report = run_evaluation(
+        [_case()], SequenceService([first, RuntimeError("private rerun failure")])
+    )
+
+    assert report.completed_count == 1
+    assert report.failed_count == 0
+    assert report.recommendation_agreement == 1.0
+    assert report.cases[0].system_recommendation is RecommendationLevel.APPLY_AFTER_REVIEW
+    assert report.cases[0].system_preference_score == 0.8
+    assert report.cases[0].system_qualification_score == 0.7
+    assert report.rerun_attempted_count == 1
+    assert report.rerun_completed_count == 0
+    assert report.rerun_failed_count == 1
+    assert report.rerun_failure_case_ids == ["invented-case-1"]
+    assert report.rerun_stability is None
+    assert report.run_complete is False
+
+
+def test_nondeterministic_completed_rerun_is_not_a_rerun_failure() -> None:
+    first = _record(RecommendationLevel.PRIORITY_APPLY, [])
+    changed = _record(RecommendationLevel.HOLD, [GapKind.CAPABILITY_GAP])
+
+    report = run_evaluation([_case()], SequenceService([first, changed]))
+
+    assert report.rerun_attempted_count == 1
+    assert report.rerun_completed_count == 1
+    assert report.rerun_failed_count == 0
+    assert report.rerun_failure_case_ids == []
+    assert report.rerun_stability == 0.0
+    assert report.run_complete is True
+
+
+def test_top_five_usefulness_uses_ranked_jobs_and_persisted_scores() -> None:
+    cases = [
+        _case(id="z-skip"),
+        _case(id="b-priority", human_top_five_usefulness=0.8),
+        _case(id="a-priority", human_top_five_usefulness=1.0),
+        _case(id="c-priority", human_top_five_usefulness=0.6),
+        _case(id="d-apply", human_top_five_usefulness=0.4),
+        _case(id="e-hold", human_top_five_usefulness=0.2),
+    ]
+    first_run = [
+        _record(RecommendationLevel.SKIP, [], preference_score=1, qualification_score=1),
+        _record(RecommendationLevel.PRIORITY_APPLY, [], preference_score=0.9, qualification_score=0.5),
+        _record(RecommendationLevel.PRIORITY_APPLY, [], preference_score=0.9, qualification_score=0.5),
+        _record(RecommendationLevel.PRIORITY_APPLY, [], preference_score=0.8, qualification_score=1),
+        _record(RecommendationLevel.APPLY_AFTER_REVIEW, [], preference_score=1, qualification_score=1),
+        _record(RecommendationLevel.HOLD, [], preference_score=1, qualification_score=1),
+    ]
+
+    report = run_evaluation(cases, SequenceService(first_run + first_run))
+
+    assert [case.id for case in report.cases] == [case.id for case in cases]
+    by_id = {case.id: case for case in report.cases}
+    assert by_id["a-priority"].system_preference_score == 0.9
+    assert by_id["a-priority"].system_qualification_score == 0.5
+    assert report.top_five_case_ids == [
+        "a-priority",
+        "b-priority",
+        "c-priority",
+        "d-apply",
+        "e-hold",
+    ]
+    assert report.top_five_usefulness == pytest.approx(0.6)
+
+    missing_selected_rating = [case.model_copy(deep=True) for case in cases]
+    missing_selected_rating[2].human_top_five_usefulness = None
+    missing = run_evaluation(
+        missing_selected_rating, SequenceService(first_run + first_run)
+    )
+    assert missing.top_five_usefulness is None
+
+
+def test_unsupported_source_audit_counts_each_defined_class() -> None:
+    unsupported_gap = SimpleNamespace(
+        kind=GapKind.CAPABILITY_GAP,
+        job_evidence=[],
+        candidate_evidence=[],
+        missing_evidence=False,
+    )
+    explicit_missing_gap = SimpleNamespace(
+        kind=GapKind.EVIDENCE_GAP,
+        job_evidence=[],
+        candidate_evidence=[],
+        missing_evidence=True,
+    )
+    unsupported_contribution = SimpleNamespace(
+        job_evidence=[], candidate_evidence=[]
+    )
+    supported_contribution = SimpleNamespace(
+        job_evidence=["jd-ref"], candidate_evidence=[]
+    )
+    record = SimpleNamespace(
+        facts=[
+            SimpleNamespace(is_unknown=False, evidence=[]),
+            SimpleNamespace(is_unknown=True, evidence=[]),
+            SimpleNamespace(is_unknown=False, evidence=["jd-ref"]),
+        ],
+        signals=[
+            SimpleNamespace(
+                status="available",
+                provider=None,
+                model=None,
+                question_id="question",
+                question_version="v1",
+                evidence=[],
+            ),
+            SimpleNamespace(
+                status="available",
+                provider="provider",
+                model="model",
+                question_id="question",
+                question_version="v1",
+                evidence=[],
+            ),
+        ],
+        result=SimpleNamespace(
+            recommendation=RecommendationLevel.APPLY_AFTER_REVIEW,
+            gaps=[unsupported_gap, explicit_missing_gap],
+            preference_score=0.5,
+            qualification_score=0.5,
+            preference_contributions=[unsupported_contribution],
+            qualification_contributions=[supported_contribution],
+        ),
+    )
+
+    report = run_evaluation([_case()], SequenceService([record, record]))
+
+    assert report.unsupported_fact_count == 1
+    assert report.unsupported_signal_count == 1
+    assert report.unsupported_gap_count == 1
+    assert report.unsupported_contribution_count == 1
+    assert report.unsupported_claim_count == 4
 
 
 def test_real_eval_paths_are_gitignored() -> None:
@@ -292,6 +447,32 @@ def test_cli_writes_partial_report_atomically_and_exits_nonzero(
     assert not list(tmp_path.glob(".report.json.*.tmp"))
 
 
+def test_cli_writes_report_and_exits_nonzero_on_rerun_failure(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "cases.jsonl"
+    destination = tmp_path / "report.json"
+    source.write_text(_case().model_dump_json() + "\n", encoding="utf-8")
+    first = _record(
+        RecommendationLevel.APPLY_AFTER_REVIEW, [GapKind.EVIDENCE_GAP]
+    )
+
+    exit_code = main(
+        [str(source), str(destination)],
+        service=SequenceService([first, RuntimeError("private rerun failure")]),
+    )
+    payload = json.loads(destination.read_text(encoding="utf-8"))
+
+    assert exit_code != 0
+    assert payload["completed_count"] == 1
+    assert payload["recommendation_agreement"] == 1.0
+    assert payload["rerun_attempted_count"] == 1
+    assert payload["rerun_completed_count"] == 0
+    assert payload["rerun_failed_count"] == 1
+    assert payload["rerun_stability"] is None
+    assert payload["run_complete"] is False
+
+
 @pytest.mark.parametrize("link_kind", ["hardlink", "symlink"])
 def test_cli_rejects_existing_destination_with_same_inode(
     tmp_path: Path, link_kind: str, capsys: pytest.CaptureFixture[str]
@@ -353,7 +534,12 @@ def test_duplicate_ids_report_both_line_numbers_without_private_content(
 
 def test_readme_documents_clean_startup_and_local_database_path() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    eval_readme = (ROOT / "eval" / "README.md").read_text(encoding="utf-8")
 
     assert "python -m ai_dream_job_engine.mcp_server" in readme
     assert ".data/ai-dream-job-engine.sqlite3" in readme
     assert "AI_DREAM_JOB_DATA_PATH" in readme
+    assert "rerun_failed_count" in readme
+    assert "system_preference_score" in eval_readme
+    assert "system_qualification_score" in eval_readme
+    assert "Candidate raw claims" in eval_readme

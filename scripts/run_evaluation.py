@@ -33,6 +33,14 @@ class AnalysisService(Protocol):
     def analyze_job(self, job_description: str) -> object: ...
 
 
+_RECOMMENDATION_RANK = {
+    RecommendationLevel.PRIORITY_APPLY: 0,
+    RecommendationLevel.APPLY_AFTER_REVIEW: 1,
+    RecommendationLevel.HOLD: 2,
+    RecommendationLevel.SKIP: 3,
+}
+
+
 def run_evaluation(
     cases: list[EvaluationCase], service: JobAnalysisService
 ) -> EvaluationReport:
@@ -45,6 +53,8 @@ def run_evaluation(
         if (
             case.system_recommendation is not None
             or case.system_gap_labels is not None
+            or case.system_preference_score is not None
+            or case.system_qualification_score is not None
         ):
             raise ValueError("pre-populated system result is not allowed")
 
@@ -52,24 +62,41 @@ def run_evaluation(
     started = time.monotonic()
     reported: list[EvaluationCase] = []
     completed_cases: list[EvaluationCase] = []
-    first_results: dict[str, tuple[RecommendationLevel, list[GapKind]]] = {}
+    first_results: dict[
+        str, tuple[RecommendationLevel, list[GapKind], float | None, float | None]
+    ] = {}
     failure_ids: list[str] = []
-    unsupported_claim_count = 0
+    unsupported_counts = {
+        "fact": 0,
+        "signal": 0,
+        "gap": 0,
+        "contribution": 0,
+    }
 
     for case in cases:
         try:
             record = service.analyze_job(case.job_description)
-            recommendation, gaps = _result_values(record)
+            recommendation, gaps, preference_score, qualification_score = (
+                _result_values(record)
+            )
         except Exception:
             failure_ids.append(case.id)
             reported.append(case.model_copy(deep=True))
             continue
-        first_results[case.id] = (recommendation, gaps)
-        unsupported_claim_count += _unsupported_claims(record)
+        first_results[case.id] = (
+            recommendation,
+            gaps,
+            preference_score,
+            qualification_score,
+        )
+        for category, count in _unsupported_sources(record).items():
+            unsupported_counts[category] += count
         evaluated_case = case.model_copy(
             update={
                 "system_recommendation": recommendation,
                 "system_gap_labels": gaps,
+                "system_preference_score": preference_score,
+                "system_qualification_score": qualification_score,
             },
             deep=True,
         )
@@ -80,16 +107,20 @@ def run_evaluation(
         raise ValueError("source evaluation case changed during analysis")
 
     stable = 0
-    rerun_count = 0
+    rerun_attempted_count = 0
+    rerun_completed_count = 0
+    rerun_failure_ids: list[str] = []
     for case in cases:
         first = first_results.get(case.id)
         if first is None:
             continue
-        rerun_count += 1
+        rerun_attempted_count += 1
         try:
             second = _result_values(service.analyze_job(case.job_description))
         except Exception:
+            rerun_failure_ids.append(case.id)
             continue
+        rerun_completed_count += 1
         if second == first:
             stable += 1
 
@@ -112,51 +143,103 @@ def run_evaluation(
         and GapKind.HARD_BLOCKER in (case.system_gap_labels or [])
         for case in completed_cases
     )
+    top_five_cases = _ranked_top_five(completed_cases)
+    unsupported_claim_count = sum(unsupported_counts.values())
+    rerun_failed_count = len(rerun_failure_ids)
 
     return EvaluationReport(
         cases=reported,
         attempted_count=len(cases),
         completed_count=completed,
         failed_count=len(failure_ids),
-        run_complete=not failure_ids,
+        rerun_attempted_count=rerun_attempted_count,
+        rerun_completed_count=rerun_completed_count,
+        rerun_failed_count=rerun_failed_count,
+        run_complete=not failure_ids and not rerun_failure_ids,
         recommendation_agreement=recommendation_agreement,
         blocker_precision=(
             true_blockers / predicted_blockers if predicted_blockers else None
         ),
         gap_type_confusion_counts=_gap_confusion(completed_cases),
+        unsupported_fact_count=unsupported_counts["fact"],
+        unsupported_signal_count=unsupported_counts["signal"],
+        unsupported_gap_count=unsupported_counts["gap"],
+        unsupported_contribution_count=unsupported_counts["contribution"],
         unsupported_claim_count=unsupported_claim_count,
-        rerun_stability=stable / rerun_count if rerun_count else None,
-        top_five_gap_label_agreement=_top_five_label_agreement(completed_cases),
-        evaluation_runtime_seconds=time.monotonic() - started,
-        top_five_usefulness=_complete_human_average(
-            completed_cases, "human_top_five_usefulness"
+        rerun_stability=(
+            stable / rerun_completed_count
+            if rerun_completed_count and not rerun_failure_ids
+            else None
         ),
+        gap_label_agreement=_gap_label_agreement(completed_cases),
+        top_five_case_ids=[case.id for case in top_five_cases],
+        evaluation_runtime_seconds=time.monotonic() - started,
+        top_five_usefulness=_top_five_usefulness(top_five_cases),
         review_time_seconds=_complete_human_total(
             completed_cases, "human_review_time_seconds"
         ),
         failure_case_ids=failure_ids,
+        rerun_failure_case_ids=rerun_failure_ids,
     )
 
 
-def _result_values(record: object) -> tuple[RecommendationLevel, list[GapKind]]:
+def _result_values(
+    record: object,
+) -> tuple[RecommendationLevel, list[GapKind], float | None, float | None]:
     result = getattr(record, "result", None)
     if result is None:
         raise ValueError("analysis did not return a result")
     recommendation = RecommendationLevel(result.recommendation)
     gaps = [GapKind(gap.kind) for gap in result.gaps]
-    return recommendation, gaps
+    return (
+        recommendation,
+        gaps,
+        getattr(result, "preference_score", None),
+        getattr(result, "qualification_score", None),
+    )
 
 
-def _unsupported_claims(record: object) -> int:
+def _unsupported_sources(record: object) -> dict[str, int]:
     result = getattr(record, "result", None)
     if result is None:
-        return 0
-    return sum(
+        return {"fact": 0, "signal": 0, "gap": 0, "contribution": 0}
+    fact_count = sum(
+        not getattr(fact, "is_unknown", False) and not getattr(fact, "evidence", [])
+        for fact in getattr(record, "facts", [])
+    )
+    signal_count = sum(
+        _is_available(signal)
+        and not all(
+            getattr(signal, field, None)
+            for field in ("provider", "model", "question_id", "question_version")
+        )
+        for signal in getattr(record, "signals", [])
+    )
+    gap_count = sum(
         not gap.job_evidence
         and not gap.candidate_evidence
-        and not gap.missing_evidence
+        and not getattr(gap, "missing_evidence", False)
         for gap in result.gaps
     )
+    contributions = [
+        *getattr(result, "preference_contributions", []),
+        *getattr(result, "qualification_contributions", []),
+    ]
+    contribution_count = sum(
+        not contribution.job_evidence and not contribution.candidate_evidence
+        for contribution in contributions
+    )
+    return {
+        "fact": fact_count,
+        "signal": signal_count,
+        "gap": gap_count,
+        "contribution": contribution_count,
+    }
+
+
+def _is_available(signal: object) -> bool:
+    status = getattr(signal, "status", None)
+    return getattr(status, "value", status) == "available"
 
 
 def _gap_confusion(
@@ -180,24 +263,36 @@ def _increment(counts: dict[str, dict[str, int]], row: str, column: str) -> None
     counts[row][column] += 1
 
 
-def _top_five_label_agreement(cases: list[EvaluationCase]) -> float | None:
+def _gap_label_agreement(cases: list[EvaluationCase]) -> float | None:
     if not cases:
         return None
     scores = []
     for case in cases:
-        predicted = list(dict.fromkeys(case.system_gap_labels or []))[:5]
+        predicted = set(case.system_gap_labels or [])
         expected = set(case.human_gap_labels)
-        if not predicted:
-            scores.append(1.0 if not expected else 0.0)
-        else:
-            scores.append(sum(label in expected for label in predicted) / len(predicted))
+        union = predicted | expected
+        scores.append(len(predicted & expected) / len(union) if union else 1.0)
     return sum(scores) / len(scores)
 
 
-def _complete_human_average(
-    cases: list[EvaluationCase], field: str
-) -> float | None:
-    values = [getattr(case, field) for case in cases]
+def _ranked_top_five(cases: list[EvaluationCase]) -> list[EvaluationCase]:
+    def rank(case: EvaluationCase) -> tuple[int, bool, float, bool, float, str]:
+        preference = case.system_preference_score
+        qualification = case.system_qualification_score
+        return (
+            _RECOMMENDATION_RANK[case.system_recommendation],  # type: ignore[index]
+            preference is None,
+            -(preference or 0),
+            qualification is None,
+            -(qualification or 0),
+            case.id,
+        )
+
+    return sorted(cases, key=rank)[:5]
+
+
+def _top_five_usefulness(cases: list[EvaluationCase]) -> float | None:
+    values = [case.human_top_five_usefulness for case in cases]
     if not values or any(value is None for value in values):
         return None
     return sum(values) / len(values)  # type: ignore[arg-type]
