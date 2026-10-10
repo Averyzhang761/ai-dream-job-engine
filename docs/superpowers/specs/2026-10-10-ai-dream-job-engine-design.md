@@ -1,10 +1,10 @@
-# AI Job Decision Engine 设计规格
+# AI Dream Job Engine 设计规格
 
 状态：等待用户审阅
 
 ## 1. 产品定义
 
-AI Job Decision Engine 是一个本地优先、开源的 Agent 插件，用来判断哪些 AI 岗位值得投入时间申请。它的核心不是抓取岗位、改写简历或自动海投，而是一套证据驱动的价值判断框架，分别回答：
+AI Dream Job Engine 是一个本地优先、开源的 Agent 插件，用来判断哪些 AI 岗位值得投入时间申请。这里的 “Dream Job” 同时受个人偏好、现实资格和可核验证据约束，不代表只寻找听起来理想的岗位。它的核心不是抓取岗位、改写简历或自动海投，而是一套证据驱动的价值判断框架，分别回答：
 
 1. 用户是否想要这份工作；
 2. 用户当前的资料是否足以证明自己适合申请；
@@ -22,6 +22,7 @@ AI Job Decision Engine 是一个本地优先、开源的 Agent 插件，用来�
 - 分开显示能力差距和证据差距。
 - 支持 OpenAI 和 OpenRouter 进行结构化提取与生成。
 - 支持 JEV 生成 decision signals，但不让 JEV 替用户定义价值观。
+- 允许用户选择是否从当前 Agent memory 导入补充背景，并在写入 Candidate Profile 前逐项确认。
 - 个人资料默认保存在本地，任何有后果的动作都需要用户确认。
 - 复用旧 AI Job Fit Analyzer 中经过验证的工程思路，但不修改旧仓库，也不复制个人数据和真实 JD 数据集。
 
@@ -34,6 +35,7 @@ AI Job Decision Engine 是一个本地优先、开源的 Agent 插件，用来�
 - 核心判断质量验证前，不做 Gmail 同步和自动岗位搜索。
 - 不允许用户在价值规则中执行任意代码。
 - 不把 Agent 记忆、模型推断或简历未提及的内容直接当作候选人事实。
+- 不在后台默认持续同步 Agent memory。
 
 ## 4. 产品形态
 
@@ -54,9 +56,22 @@ Agent 是交互入口和信息发现者；本地 Candidate Profile 是用户确�
 3. 系统提取候选人信息，并保留原文证据。
 4. Agent 可以从用户授权的上下文中提出补充信息，但必须等待用户确认。
 5. 用户调整偏好、硬约束、权重和推荐阈值。
-6. 用户配置 OpenAI 或 OpenRouter，并可连接 JEV。
+6. 用户可以选择是否预览 Agent memory 中可能相关的经历和偏好。
+7. 用户逐项接受、修改或拒绝候选信息，确认后才写入 Candidate Profile。
+8. 用户配置 OpenAI 或 OpenRouter，并可连接 JEV。
 
-### 5.2 分析岗位
+### 5.2 Agent Memory 导入
+
+Agent memory 是可选信息源，不是事实数据库：
+
+1. 默认关闭，只有用户主动选择时才读取；
+2. 用户可以限制导入范围，例如项目、技能、职业偏好或工作约束；
+3. 系统先生成带来源的变更预览，不直接修改 Candidate Profile；
+4. 用户逐项确认后，内容以 `user_confirmed` 保存，并保留原始来源；
+5. 后续刷新只展示新增、变化和冲突，不静默覆盖已有信息；
+6. 用户可以断开来源，并删除由该来源导入的信息。
+
+### 5.3 分析岗位
 
 1. 用户提供 JD 文本或本地可读来源。
 2. 提取模型生成带 JD 证据的结构化事实。
@@ -202,6 +217,9 @@ JD 输入
 - `initialize_profile`：从简历生成待确认信息；
 - `review_profile_claims`：查看待确认信息及来源；
 - `confirm_profile_claims`：接受、修改或拒绝信息；
+- `preview_agent_memory_import`：按用户选择的范围预览 Agent memory 候选信息；
+- `confirm_agent_memory_import`：确认、修改或拒绝导入变更；
+- `disconnect_agent_memory`：停止后续读取，并选择是否删除已导入信息；
 - `get_rubric`：读取默认模板和用户覆盖项；
 - `update_rubric`：应用通过校验的声明式修改；
 - `analyze_job`：分析一个 JD 并保存结果；
@@ -218,7 +236,9 @@ Skill 负责引导 Agent 收集缺失信息、请求确认，并避免把推断�
 - API key 不进入数据库和仓库；使用环境变量或宿主支持的密钥存储。
 - 每次模型调用只发送完成任务所需的最少字段。
 - 记录哪个供应商接收了哪一类数据。
-- 未经用户明确连接或提供，不读取邮箱、Agent 记忆或本地文件。
+- 未经用户明确连接或提供，不读取邮箱、Agent memory 或本地文件。
+- Agent memory 导入默认关闭，只能由用户主动触发，并在保存前显示来源和变更预览。
+- 不把不同 Agent 的 memory 视为自动一致；每个来源都单独记录，冲突交给用户确认。
 
 ## 12. 可靠性验证
 
