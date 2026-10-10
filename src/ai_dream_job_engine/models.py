@@ -369,6 +369,7 @@ class DecisionTrace(DomainModel):
 
 class AnalysisRecord(DomainModel):
     id: str = Field(min_length=1)
+    source_analysis_id: str | None = None
     input_hash: str = Field(min_length=1)
     facts: list[ExtractedFact] = Field(default_factory=list)
     signals: list[DecisionSignal] = Field(default_factory=list)

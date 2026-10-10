@@ -19,6 +19,7 @@ from ai_dream_job_engine.providers.base import ProviderError
 
 JEV_ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 JEV_MODEL = "jev-latest"
+PROMPT_VERSION = "jev-signal-v1"
 
 
 class _JevAnswer(BaseModel):
@@ -36,6 +37,10 @@ class _JevResponse(BaseModel):
 
 
 class JevSignalProvider:
+    provider = "jev"
+    model = JEV_MODEL
+    prompt_version = PROMPT_VERSION
+
     def __init__(
         self,
         *,

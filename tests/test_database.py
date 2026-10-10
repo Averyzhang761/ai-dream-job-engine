@@ -306,6 +306,27 @@ def test_analysis_replacement_uses_replacement_creation_time(tmp_path) -> None:
     assert loaded[0] == replacement
 
 
+def test_analysis_insert_rejects_duplicate_without_overwrite(tmp_path) -> None:
+    store = LocalStore.open(tmp_path / "store.sqlite3")
+    store.initialize()
+    original = _analysis(
+        "analysis-a",
+        datetime(2026, 1, 1, tzinfo=timezone.utc),
+        input_hash="sha256:original",
+    )
+    duplicate = _analysis(
+        "analysis-a",
+        datetime(2026, 1, 2, tzinfo=timezone.utc),
+        input_hash="sha256:duplicate",
+    )
+    store.insert_analysis(original)
+
+    with pytest.raises(StoreError, match="analysis insert failed"):
+        store.insert_analysis(duplicate)
+
+    assert store.list_analyses() == [original]
+
+
 def test_connections_close_on_success_and_exception(tmp_path, monkeypatch) -> None:
     database_path = tmp_path / "store.sqlite3"
     unsupported_path = tmp_path / "unsupported.sqlite3"

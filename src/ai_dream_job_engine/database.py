@@ -95,6 +95,27 @@ class LocalStore:
             replace_created_at=True,
         )
 
+    def insert_analysis(self, record: AnalysisRecord) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            with closing(sqlite3.connect(self._path)) as connection, connection:
+                connection.execute(
+                    """
+                    INSERT INTO analyses
+                        (id, schema_version, payload, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        record.id,
+                        SCHEMA_VERSION,
+                        record.model_dump_json(),
+                        self._utc_timestamp(record.created_at),
+                        now,
+                    ),
+                )
+        except sqlite3.DatabaseError as error:
+            raise StoreError("analysis insert failed") from error
+
     def list_analyses(self) -> list[AnalysisRecord]:
         with closing(sqlite3.connect(self._path)) as connection:
             rows = connection.execute(

@@ -8,7 +8,7 @@ import time
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, TypeVar
 
 from ai_dream_job_engine.database import LocalStore
 from ai_dream_job_engine.decision import decide_job
@@ -32,22 +32,252 @@ from ai_dream_job_engine.providers.base import (
 
 _FAILURE_CATEGORY = "analysis_failed"
 _FAILURE_MESSAGE = "Job analysis failed safely."
+_STORAGE_CATEGORY = "storage_failed"
+_STORAGE_MESSAGE = "Local analysis storage failed safely."
+_ID_CATEGORY = "analysis_id_collision"
+_ID_MESSAGE = "A unique analysis ID could not be allocated safely."
+_STAGES = {"facts", "signals"}
+_T = TypeVar("_T")
 
 
 class AnalysisServiceError(RuntimeError):
-    """A stable, actionable service error without provider details."""
+    """A fixed service error without provider or storage details."""
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
 
 
-class JobAnalysisService:
-    """Run providers once, persist safe inputs, and recompute locally.
+class _PersistedRecordSafety:
+    """Project sensitive inputs and validate every record before storage."""
 
-    Provider, evidence, and decision failures are saved as sanitized failed
-    records and then raised as AnalysisServiceError. Recompute replaces the
-    same stable analysis ID in place and preserves its original creation time.
+    def __init__(
+        self,
+        input_hash: str,
+        rubric: Rubric,
+        profile: CandidateProfile,
+        raw_job: str | None,
+    ) -> None:
+        self.input_hash = input_hash
+        self.rubric = rubric
+        self.profile = _safe_profile(profile)
+        self.raw_job = raw_job
+        self.job_digest = input_hash.removeprefix("sha256:")
+
+    def project_inputs(
+        self,
+        facts: list[ExtractedFact],
+        signals: list[DecisionSignal],
+    ) -> tuple[list[ExtractedFact], list[DecisionSignal]]:
+        return self.project_facts(facts), self.project_signals(signals)
+
+    def project_facts(
+        self,
+        facts: list[ExtractedFact],
+    ) -> list[ExtractedFact]:
+        if self.raw_job is None:
+            raise ValueError("raw job required")
+        self._complete_facts(facts)
+        document = build_evidence_chunks(self.raw_job)
+        safe_facts = []
+        for fact in sorted(facts, key=lambda item: item.fact_id):
+            if _contains_exact(fact.value, self.raw_job):
+                raise ValueError("raw job fact value")
+            definition = next(
+                item for item in self.rubric.facts if item.id == fact.fact_id
+            )
+            if (
+                definition.requires_evidence
+                and not fact.is_unknown
+                and not fact.evidence
+            ):
+                raise ValueError("missing fact evidence")
+            refs = []
+            for quote in fact.evidence:
+                evidence = validate_quote(document, quote)
+                refs.append(
+                    self._jd_ref(
+                        evidence.start_offset,
+                        evidence.end_offset,
+                        quote,
+                    )
+                )
+            safe_facts.append(fact.model_copy(update={"evidence": refs}))
+
+        return safe_facts
+
+    def project_signals(
+        self,
+        signals: list[DecisionSignal],
+    ) -> list[DecisionSignal]:
+        self._complete_signals(signals)
+        return [
+            signal.model_copy(
+                update={
+                    "evidence": [
+                        self._provider_ref(value) for value in signal.evidence
+                    ]
+                }
+            )
+            for signal in sorted(signals, key=lambda item: item.question_id)
+        ]
+
+    def validate(self, record: AnalysisRecord) -> AnalysisRecord:
+        if record.input_hash != self.input_hash:
+            raise ValueError("input hash changed")
+        if self.raw_job is not None and _contains_exact(
+            record.model_dump(mode="python"), self.raw_job
+        ):
+            raise ValueError("record contains raw job")
+        if record.status == "failed":
+            if record.facts or record.signals or record.result or record.trace:
+                raise ValueError("failed record has partial success")
+            return record
+        if record.result is None or record.trace is None:
+            raise ValueError("success is incomplete")
+        self._complete(record.facts, record.signals)
+        self._versions(record)
+        self._evidence(record)
+        expected_inputs = {
+            self.profile.id,
+            *(claim.id for claim in self.profile.claims if claim.confirmed),
+            *(item.id for item in self.rubric.facts),
+            *(item.id for item in self.rubric.questions),
+        }
+        if set(record.trace.input_ids) != expected_inputs:
+            raise ValueError("trace input refs incomplete")
+        if record.trace.outbound_data_classes != [DataClass.PUBLIC_JOB_DATA]:
+            raise ValueError("unsafe outbound data class")
+        return record
+
+    def _complete(
+        self,
+        facts: list[ExtractedFact],
+        signals: list[DecisionSignal],
+    ) -> None:
+        self._complete_facts(facts)
+        self._complete_signals(signals)
+
+    def _complete_facts(self, facts: list[ExtractedFact]) -> None:
+        expected_facts = {item.id for item in self.rubric.facts}
+        actual_facts = [item.fact_id for item in facts]
+        if (
+            not expected_facts
+            or len(actual_facts) != len(set(actual_facts))
+            or set(actual_facts) != expected_facts
+        ):
+            raise ValueError("fact set incomplete")
+
+    def _complete_signals(self, signals: list[DecisionSignal]) -> None:
+        expected_signals = {
+            (item.id, item.version) for item in self.rubric.questions
+        }
+        actual_signals = [
+            (item.question_id, item.question_version) for item in signals
+        ]
+        if (
+            not expected_signals
+            or len(actual_signals) != len(set(actual_signals))
+            or set(actual_signals) != expected_signals
+        ):
+            raise ValueError("signal set incomplete")
+
+    def _versions(self, record: AnalysisRecord) -> None:
+        trace = record.trace
+        result = record.result
+        if trace is None or result is None:
+            raise ValueError("versions missing")
+        for versions in (
+            trace.providers,
+            trace.model_versions,
+            trace.prompt_versions,
+        ):
+            if set(versions) != _STAGES or any(not item for item in versions.values()):
+                raise ValueError("stage metadata incomplete")
+        questions = {item.id: item.version for item in self.rubric.questions}
+        if trace.question_versions != questions:
+            raise ValueError("question versions incomplete")
+        if trace.rubric_version != self.rubric.version:
+            raise ValueError("trace rubric stale")
+        if result.rubric_version != self.rubric.version:
+            raise ValueError("result rubric stale")
+        if trace.result_version != result.result_version:
+            raise ValueError("result version mismatch")
+        if result.model_versions != trace.model_versions:
+            raise ValueError("model versions mismatch")
+
+    def _evidence(self, record: AnalysisRecord) -> None:
+        trace = record.trace
+        result = record.result
+        if trace is None or result is None:
+            raise ValueError("evidence missing")
+        job_refs = [
+            *(item for fact in record.facts for item in fact.evidence),
+            *(item for signal in record.signals for item in signal.evidence),
+            *(
+                item
+                for contribution in (
+                    result.preference_contributions
+                    + result.qualification_contributions
+                )
+                for item in contribution.job_evidence
+            ),
+            *(item for gap in result.gaps for item in gap.job_evidence),
+        ]
+        profile_refs = [
+            *(
+                item
+                for contribution in (
+                    result.preference_contributions
+                    + result.qualification_contributions
+                )
+                for item in contribution.candidate_evidence
+            ),
+            *(item for gap in result.gaps for item in gap.candidate_evidence),
+        ]
+        if any(not self._job_or_provider_ref(item) for item in job_refs):
+            raise ValueError("raw job evidence")
+        if any(not item.startswith("profile-ref:v1:") for item in profile_refs):
+            raise ValueError("raw profile evidence")
+        if any(
+            not (
+                self._job_or_provider_ref(item)
+                or item.startswith("profile-ref:v1:")
+            )
+            for item in trace.evidence
+        ):
+            raise ValueError("raw trace evidence")
+
+    def _jd_ref(self, start: int, end: int, value: str) -> str:
+        return (
+            f"jd-evidence:v1:{self.job_digest}:{start}:{end}:{_digest(value)}"
+        )
+
+    def _provider_ref(self, value: str) -> str:
+        if self.raw_job is None:
+            raise ValueError("raw job required")
+        start = self.raw_job.find(value)
+        if value and start >= 0:
+            return self._jd_ref(start, start + len(value), value)
+        return (
+            f"provider-evidence:v1:{self.job_digest}:na:na:{_digest(value)}"
+        )
+
+    def _job_or_provider_ref(self, value: str) -> bool:
+        return value.startswith(
+            (
+                f"jd-evidence:v1:{self.job_digest}:",
+                f"provider-evidence:v1:{self.job_digest}:",
+            )
+        )
+
+
+class JobAnalysisService:
+    """Orchestrate providers and persist only safety-projected records.
+
+    New analyses and failed recompute attempts are append-only. Successful
+    recompute updates its original stable ID. Pipeline and storage errors expose
+    only fixed safe messages.
     """
 
     def __init__(
@@ -74,55 +304,68 @@ class JobAnalysisService:
                 "Job description is empty; provide public job text before analysis.",
             )
         profile, rubric = self._active_inputs()
-        analysis_id = self._id_factory()
         input_hash = _input_hash(job_description)
+        safety = _PersistedRecordSafety(
+            input_hash, rubric, profile, job_description
+        )
+        analysis_id = self._allocate_id()
         created_at = self._utc_clock()
         started_at = self._monotonic_clock()
-
+        failed = False
         try:
-            facts = sorted(
-                self._fact_extractor.extract(job_description, rubric),
-                key=lambda fact: fact.fact_id,
+            raw_facts = self._fact_extractor.extract(job_description, rubric)
+            facts = safety.project_facts(raw_facts)
+            raw_signals = self._signal_provider.judge(
+                job_description, rubric.questions
             )
-            self._validate_fact_evidence(job_description, facts, rubric)
-            signals = sorted(
-                self._signal_provider.judge(job_description, rubric.questions),
-                key=lambda signal: signal.question_id,
+            signals = safety.project_signals(raw_signals)
+            metadata = self._metadata(facts, signals)
+            result = _decision(
+                facts,
+                signals,
+                safety.profile,
+                rubric,
+                metadata["models"],
+                metadata["prompts"],
             )
-            result = self._decision(facts, signals, profile, rubric)
-            trace = self._trace(
+            trace = _trace(
                 analysis_id,
                 facts,
                 signals,
-                profile,
+                safety.profile,
                 rubric,
                 result,
+                metadata,
             )
-            record = AnalysisRecord(
-                id=analysis_id,
-                input_hash=input_hash,
-                facts=facts,
-                signals=signals,
-                result=result,
-                trace=trace,
-                status="success",
-                latency_ms=_latency_ms(started_at, self._monotonic_clock()),
-                created_at=created_at,
+            record = safety.validate(
+                AnalysisRecord(
+                    id=analysis_id,
+                    input_hash=input_hash,
+                    facts=facts,
+                    signals=signals,
+                    result=result,
+                    trace=trace,
+                    status="success",
+                    latency_ms=_latency_ms(
+                        started_at, self._monotonic_clock()
+                    ),
+                    created_at=created_at,
+                )
             )
         except Exception:
-            failed = self._failed_record(
+            failed = True
+        if failed:
+            self._try_failure(
+                safety,
                 analysis_id,
                 input_hash,
                 created_at,
                 started_at,
             )
-            self._store.save_analysis(failed)
             raise AnalysisServiceError(
-                _FAILURE_CATEGORY,
-                _FAILURE_MESSAGE,
+                _FAILURE_CATEGORY, _FAILURE_MESSAGE
             ) from None
-
-        self._store.save_analysis(record)
+        self._insert_or_raise(record)
         return record
 
     def recompute_decision(self, analysis_id: str) -> AnalysisRecord:
@@ -132,56 +375,73 @@ class JobAnalysisService:
                 "analysis_not_found",
                 "Analysis was not found; choose a successful analysis ID.",
             )
-        if existing.status != "success" or existing.result is None:
+        if (
+            existing.status != "success"
+            or existing.result is None
+            or existing.trace is None
+        ):
             raise AnalysisServiceError(
                 "analysis_not_successful",
                 "Analysis cannot be recomputed; choose a successful analysis ID.",
             )
         profile, rubric = self._active_inputs()
+        attempt_id = self._allocate_id()
+        safety = _PersistedRecordSafety(
+            existing.input_hash, rubric, profile, None
+        )
         started_at = self._monotonic_clock()
-
+        metadata = {
+            "providers": existing.trace.providers,
+            "models": existing.trace.model_versions,
+            "prompts": existing.trace.prompt_versions,
+        }
+        failed = False
         try:
-            result = self._decision(
+            result = _decision(
                 existing.facts,
                 existing.signals,
-                profile,
+                safety.profile,
                 rubric,
-                previous_trace=existing.trace,
+                metadata["models"],
+                metadata["prompts"],
             )
-            trace = self._trace(
+            trace = _trace(
                 existing.id,
                 existing.facts,
                 existing.signals,
-                profile,
+                safety.profile,
                 rubric,
                 result,
-                previous_trace=existing.trace,
+                metadata,
             )
-            recomputed = existing.model_copy(
-                update={
-                    "result": result,
-                    "trace": trace,
-                    "latency_ms": _latency_ms(
-                        started_at, self._monotonic_clock()
-                    ),
-                    "error_category": None,
-                    "error": None,
-                }
+            recomputed = safety.validate(
+                existing.model_copy(
+                    update={
+                        "result": result,
+                        "trace": trace,
+                        "latency_ms": _latency_ms(
+                            started_at, self._monotonic_clock()
+                        ),
+                        "error_category": None,
+                        "error": None,
+                    }
+                )
             )
         except Exception:
-            failed = self._failed_record(
-                existing.id,
+            failed = True
+        if failed:
+            self._try_failure(
+                safety,
+                attempt_id,
                 existing.input_hash,
-                existing.created_at,
+                self._utc_clock(),
                 started_at,
+                source_analysis_id=existing.id,
             )
-            self._store.save_analysis(failed)
             raise AnalysisServiceError(
-                _FAILURE_CATEGORY,
-                _FAILURE_MESSAGE,
+                _FAILURE_CATEGORY, _FAILURE_MESSAGE
             ) from None
-
-        self._store.save_analysis(recomputed)
+        self._save_or_raise(recomputed)
         return recomputed
 
     def get_decision_trace(self, analysis_id: str) -> DecisionTrace:
@@ -199,29 +459,26 @@ class JobAnalysisService:
         return record.trace
 
     def list_analyzed_jobs(self) -> list[AnalysisSummary]:
-        summaries = []
-        for record in self._store.list_analyses():
-            if record.status != "success" or record.result is None:
-                continue
-            summaries.append(
-                AnalysisSummary(
-                    analysis_id=record.id,
-                    recommendation=record.result.recommendation,
-                    job_title=_text_fact(record.facts, "job_title", "title"),
-                    company=_text_fact(record.facts, "company", "company_name"),
-                    created_at=record.created_at,
-                )
+        return [
+            AnalysisSummary(
+                analysis_id=record.id,
+                recommendation=record.result.recommendation,
+                job_title=_text_fact(record.facts, "job_title", "title"),
+                company=_text_fact(record.facts, "company", "company_name"),
+                created_at=record.created_at,
             )
-        return summaries
+            for record in self._store_call(self._store.list_analyses)
+            if record.status == "success" and record.result is not None
+        ]
 
     def _active_inputs(self) -> tuple[CandidateProfile, Rubric]:
-        profile = self._store.load_profile()
+        profile = self._store_call(self._store.load_profile)
         if profile is None:
             raise AnalysisServiceError(
                 "missing_profile",
                 "Candidate profile is missing; initialize the profile before analysis.",
             )
-        rubric = self._store.load_rubric()
+        rubric = self._store_call(self._store.load_rubric)
         if rubric is None:
             raise AnalysisServiceError(
                 "missing_rubric",
@@ -229,207 +486,226 @@ class JobAnalysisService:
             )
         return profile, rubric
 
-    def _decision(
+    def _allocate_id(self) -> str:
+        failed = False
+        try:
+            analysis_id = self._id_factory()
+        except Exception:
+            failed = True
+            analysis_id = ""
+        if failed or not isinstance(analysis_id, str) or not analysis_id:
+            raise AnalysisServiceError(_ID_CATEGORY, _ID_MESSAGE) from None
+        if any(
+            item.id == analysis_id
+            for item in self._store_call(self._store.list_analyses)
+        ):
+            raise AnalysisServiceError(_ID_CATEGORY, _ID_MESSAGE)
+        return analysis_id
+
+    def _metadata(
         self,
         facts: list[ExtractedFact],
         signals: list[DecisionSignal],
-        profile: CandidateProfile,
-        rubric: Rubric,
-        *,
-        previous_trace: DecisionTrace | None = None,
-    ) -> DecisionResult:
-        result = decide_job(
-            facts,
-            signals,
-            _profile_with_evidence_refs(profile),
-            rubric,
-        )
-        if previous_trace is None:
-            prompt_versions = self._prompt_versions()
-            model_versions = self._model_versions(facts, signals)
-        else:
-            prompt_versions = previous_trace.prompt_versions
-            model_versions = previous_trace.model_versions
-        return result.model_copy(
-            update={
-                "prompt_version": ";".join(
-                    f"{key}:{value}" for key, value in prompt_versions.items()
+    ) -> dict[str, dict[str, str]]:
+        return {
+            "providers": {
+                "facts": _stage_metadata(
+                    self._fact_extractor, facts, "provider", "fact extractor"
                 ),
-                "model_versions": model_versions,
-            }
-        )
-
-    def _trace(
-        self,
-        analysis_id: str,
-        facts: list[ExtractedFact],
-        signals: list[DecisionSignal],
-        profile: CandidateProfile,
-        rubric: Rubric,
-        result: DecisionResult,
-        *,
-        previous_trace: DecisionTrace | None = None,
-    ) -> DecisionTrace:
-        if previous_trace is None:
-            providers = self._provider_ids(facts, signals)
-            models = self._model_versions(facts, signals)
-            prompts = self._prompt_versions()
-        else:
-            providers = previous_trace.providers
-            models = previous_trace.model_versions
-            prompts = previous_trace.prompt_versions
-
-        active_claim_ids = [
-            claim.id
-            for claim in profile.claims
-            if claim.confirmed
-        ]
-        evidence = [item for fact in facts for item in fact.evidence]
-        evidence += [item for signal in signals for item in signal.evidence]
-        evidence += [
-            item
-            for contribution in (
-                result.preference_contributions
-                + result.qualification_contributions
-            )
-            for item in contribution.candidate_evidence
-        ]
-        evidence += [
-            item
-            for gap in result.gaps
-            for item in gap.candidate_evidence
-        ]
-        return DecisionTrace(
-            analysis_id=analysis_id,
-            input_ids=sorted(
-                {
-                    profile.id,
-                    *active_claim_ids,
-                    *(fact.fact_id for fact in facts),
-                    *(signal.question_id for signal in signals),
-                }
-            ),
-            evidence=sorted(set(evidence)),
-            providers=providers,
-            model_versions=models,
-            rubric_version=rubric.version,
-            prompt_versions=prompts,
-            question_versions={
-                question.id: question.version
-                for question in sorted(rubric.questions, key=lambda item: item.id)
+                "signals": _stage_metadata(
+                    self._signal_provider,
+                    signals,
+                    "provider",
+                    "signal provider",
+                ),
             },
-            result_version=result.result_version,
-            outbound_data_classes=[DataClass.PUBLIC_JOB_DATA],
-        )
-
-    def _provider_ids(
-        self,
-        facts: list[ExtractedFact],
-        signals: list[DecisionSignal],
-    ) -> dict[str, str]:
-        return {
-            "facts": _stage_metadata(
-                self._fact_extractor, facts, "provider", "fact extractor"
-            ),
-            "signals": _stage_metadata(
-                self._signal_provider, signals, "provider", "signal provider"
-            ),
+            "models": {
+                "facts": _stage_metadata(
+                    self._fact_extractor, facts, "model", "fact model"
+                ),
+                "signals": _stage_metadata(
+                    self._signal_provider, signals, "model", "signal model"
+                ),
+            },
+            "prompts": {
+                "facts": _prompt_version(self._fact_extractor),
+                "signals": _prompt_version(self._signal_provider),
+            },
         }
 
-    def _model_versions(
-        self,
-        facts: list[ExtractedFact],
-        signals: list[DecisionSignal],
-    ) -> dict[str, str]:
-        return {
-            "facts": _stage_metadata(
-                self._fact_extractor, facts, "model", "fact model"
-            ),
-            "signals": _stage_metadata(
-                self._signal_provider, signals, "model", "signal model"
-            ),
-        }
+    def _find_analysis(self, analysis_id: str) -> AnalysisRecord | None:
+        records = self._store_call(self._store.list_analyses)
+        return next((item for item in records if item.id == analysis_id), None)
 
-    def _prompt_versions(self) -> dict[str, str]:
-        versions = {}
-        fact_version = _prompt_version(self._fact_extractor)
-        signal_version = _prompt_version(self._signal_provider)
-        if fact_version is not None:
-            versions["facts"] = fact_version
-        if signal_version is not None:
-            versions["signals"] = signal_version
-        if not versions:
-            raise ValueError("provider prompt version metadata is missing")
-        return versions
+    def _insert_or_raise(self, record: AnalysisRecord) -> None:
+        failed = False
+        try:
+            self._store.insert_analysis(record)
+        except Exception:
+            failed = True
+        if failed:
+            raise AnalysisServiceError(
+                _STORAGE_CATEGORY, _STORAGE_MESSAGE
+            ) from None
 
-    def _failed_record(
+    def _save_or_raise(self, record: AnalysisRecord) -> None:
+        failed = False
+        try:
+            self._store.save_analysis(record)
+        except Exception:
+            failed = True
+        if failed:
+            raise AnalysisServiceError(
+                _STORAGE_CATEGORY, _STORAGE_MESSAGE
+            ) from None
+
+    def _try_failure(
         self,
+        safety: _PersistedRecordSafety,
         analysis_id: str,
         input_hash: str,
         created_at: datetime,
         started_at: float,
-    ) -> AnalysisRecord:
-        return AnalysisRecord(
-            id=analysis_id,
-            input_hash=input_hash,
-            status="failed",
-            latency_ms=_latency_ms(started_at, self._monotonic_clock()),
-            error_category=_FAILURE_CATEGORY,
-            error=_FAILURE_MESSAGE,
-            created_at=created_at,
-        )
-
-    def _find_analysis(self, analysis_id: str) -> AnalysisRecord | None:
-        return next(
-            (
-                record
-                for record in self._store.list_analyses()
-                if record.id == analysis_id
-            ),
-            None,
-        )
-
-    @staticmethod
-    def _validate_fact_evidence(
-        job_description: str,
-        facts: list[ExtractedFact],
-        rubric: Rubric,
+        *,
+        source_analysis_id: str | None = None,
     ) -> None:
-        definitions = {definition.id: definition for definition in rubric.facts}
-        document = build_evidence_chunks(job_description)
-        for fact in facts:
-            definition = definitions.get(fact.fact_id)
-            if definition is None:
-                raise ValueError("fact is not defined by the active rubric")
-            if (
-                definition.requires_evidence
-                and not fact.is_unknown
-                and not fact.evidence
-            ):
-                raise ValueError("required fact evidence is missing")
-            for quote in fact.evidence:
-                validate_quote(document, quote)
+        try:
+            record = safety.validate(
+                AnalysisRecord(
+                    id=analysis_id,
+                    source_analysis_id=source_analysis_id,
+                    input_hash=input_hash,
+                    status="failed",
+                    latency_ms=_latency_ms(started_at, self._monotonic_clock()),
+                    error_category=_FAILURE_CATEGORY,
+                    error=_FAILURE_MESSAGE,
+                    created_at=created_at,
+                )
+            )
+            self._store.insert_analysis(record)
+        except Exception:
+            pass
+
+    def _store_call(self, operation: Callable[[], _T]) -> _T:
+        failed = False
+        value: _T | None = None
+        try:
+            value = operation()
+        except Exception:
+            failed = True
+        if failed:
+            raise AnalysisServiceError(
+                _STORAGE_CATEGORY, _STORAGE_MESSAGE
+            ) from None
+        return value  # type: ignore[return-value]
 
 
-def _input_hash(job_description: str) -> str:
-    digest = hashlib.sha256(job_description.encode("utf-8")).hexdigest()
-    return f"sha256:{digest}"
+def _decision(
+    facts: list[ExtractedFact],
+    signals: list[DecisionSignal],
+    profile: CandidateProfile,
+    rubric: Rubric,
+    models: dict[str, str],
+    prompts: dict[str, str],
+) -> DecisionResult:
+    result = decide_job(facts, signals, profile, rubric)
+    return result.model_copy(
+        update={
+            "prompt_version": ";".join(
+                f"{key}:{value}" for key, value in sorted(prompts.items())
+            ),
+            "model_versions": models,
+        }
+    )
 
 
-def _latency_ms(started_at: float, finished_at: float) -> int:
-    return max(0, round((finished_at - started_at) * 1000))
+def _trace(
+    analysis_id: str,
+    facts: list[ExtractedFact],
+    signals: list[DecisionSignal],
+    profile: CandidateProfile,
+    rubric: Rubric,
+    result: DecisionResult,
+    metadata: dict[str, dict[str, str]],
+) -> DecisionTrace:
+    evidence = [item for fact in facts for item in fact.evidence]
+    evidence += [item for signal in signals for item in signal.evidence]
+    evidence += [
+        item
+        for contribution in (
+            result.preference_contributions + result.qualification_contributions
+        )
+        for item in contribution.candidate_evidence
+    ]
+    evidence += [item for gap in result.gaps for item in gap.candidate_evidence]
+    return DecisionTrace(
+        analysis_id=analysis_id,
+        input_ids=sorted(
+            {
+                profile.id,
+                *(claim.id for claim in profile.claims if claim.confirmed),
+                *(fact.fact_id for fact in facts),
+                *(signal.question_id for signal in signals),
+            }
+        ),
+        evidence=sorted(set(evidence)),
+        providers=metadata["providers"],
+        model_versions=metadata["models"],
+        rubric_version=rubric.version,
+        prompt_versions=metadata["prompts"],
+        question_versions={
+            item.id: item.version
+            for item in sorted(rubric.questions, key=lambda item: item.id)
+        },
+        result_version=result.result_version,
+        outbound_data_classes=[DataClass.PUBLIC_JOB_DATA],
+    )
 
 
-def _profile_with_evidence_refs(profile: CandidateProfile) -> CandidateProfile:
+def _input_hash(value: str) -> str:
+    return f"sha256:{_digest(value)}"
+
+
+def _digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _opaque_ref(namespace: str, *values: str) -> str:
+    return f"profile-ref:v1:{_digest(chr(0).join((namespace, *values)))}"
+
+
+def _safe_profile(profile: CandidateProfile) -> CandidateProfile:
+    safe_profile_id = _opaque_ref("profile", profile.id)
     claims = []
     for claim in profile.claims:
+        safe_claim_id = _opaque_ref("claim", profile.id, claim.id)
         payload = claim.model_dump(mode="python")
+        payload["id"] = safe_claim_id
         if claim.source_quote is not None:
-            payload["source_quote"] = f"claim:{claim.id}"
+            payload["source_quote"] = safe_claim_id
         if claim.provenance is not None:
-            payload["provenance"] = f"claim:{claim.id}"
+            payload["provenance"] = safe_claim_id
         claims.append(type(claim).model_validate(payload))
-    return profile.model_copy(update={"claims": claims})
+    return profile.model_copy(
+        update={
+            "id": safe_profile_id,
+            "claims": claims,
+            "import_receipts": [],
+        }
+    )
+
+
+def _contains_exact(value: Any, target: str) -> bool:
+    if isinstance(value, str):
+        return target in value
+    if isinstance(value, dict):
+        return any(
+            _contains_exact(key, target) or _contains_exact(item, target)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple, set)):
+        return any(_contains_exact(item, target) for item in value)
+    return False
 
 
 def _stage_metadata(
@@ -438,25 +714,32 @@ def _stage_metadata(
     field: str,
     label: str,
 ) -> str:
+    if not outputs:
+        raise ValueError(f"{label} metadata missing")
+    values = {getattr(item, field, None) for item in outputs}
+    if None in values or "" in values:
+        raise ValueError(f"{label} metadata missing")
     direct = getattr(provider, field, None)
-    values = {getattr(output, field, None) for output in outputs}
-    values.discard(None)
     if direct:
         values.add(direct)
     if len(values) != 1:
-        raise ValueError(f"{label} metadata is missing or inconsistent")
+        raise ValueError(f"{label} metadata inconsistent")
     return str(values.pop())
 
 
-def _prompt_version(provider: Any) -> str | None:
+def _prompt_version(provider: Any) -> str:
     direct = getattr(provider, "prompt_version", None)
     if direct:
         return str(direct)
     module = importlib.import_module(type(provider).__module__)
-    module_version = getattr(module, "PROMPT_VERSION", None)
-    if module_version:
-        return str(module_version)
-    return None
+    version = getattr(module, "PROMPT_VERSION", None)
+    if version:
+        return str(version)
+    raise ValueError("provider prompt version metadata missing")
+
+
+def _latency_ms(started_at: float, finished_at: float) -> int:
+    return max(0, round((finished_at - started_at) * 1000))
 
 
 def _text_fact(facts: list[ExtractedFact], *fact_ids: str) -> str | None:
