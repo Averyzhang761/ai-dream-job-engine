@@ -19,10 +19,6 @@ from ai_dream_job_engine.profile import (
 
 
 OBSERVED_AT = datetime(2026, 10, 10, tzinfo=timezone.utc)
-CONFIRMED_MEMORY_1_ID = (
-    "agent-import:"
-    "0774fd491a0e48afd4cf1cc622ab1bd396691cc092f35909c40e6cafe106bf31"
-)
 
 
 class FakeResumeExtractor:
@@ -107,10 +103,15 @@ def test_previewed_candidate_can_be_confirmed_and_unknown_ids_are_rejected() -> 
         preview=preview,
     )
 
-    assert [claim.id for claim in result.claims] == [
-        "memory-1",
-        CONFIRMED_MEMORY_1_ID,
-    ]
+    assert result.claims[0].id == "memory-1"
+    assert result.claims[1].id.startswith("agent-import:")
+    exact_replay = confirm_claims(
+        result,
+        [ClaimDecision(claim_id="memory-1", action="accept")],
+        preview=preview,
+    )
+    assert exact_replay == result
+
     with pytest.raises(ValueError, match="unknown claim IDs"):
         confirm_claims(
             profile,
@@ -140,7 +141,7 @@ def test_confirmed_memory_claim_becomes_user_confirmed_and_keeps_provenance() ->
     confirmed = next(claim for claim in result.claims if claim.confirmed)
     retained = next(claim for claim in result.claims if not claim.confirmed)
     assert retained == suggestion
-    assert confirmed.id == CONFIRMED_MEMORY_1_ID
+    assert confirmed.id.startswith("agent-import:")
     assert confirmed is not suggestion
     assert confirmed.source is ClaimSource.USER_CONFIRMED
     assert confirmed.value == "Applied AI PM"
@@ -149,8 +150,14 @@ def test_confirmed_memory_claim_becomes_user_confirmed_and_keeps_provenance() ->
     assert confirmed.provenance == suggestion.provenance
     assert confirmed.observed_at == suggestion.observed_at
     assert confirmed.confidence == suggestion.confidence
+    assert confirmed.import_origin is not None
+    assert confirmed.import_origin.candidate_id == suggestion.id
+    assert confirmed.import_origin.confirmed_value == confirmed.value
     assert suggestion.source is ClaimSource.AGENT_SUGGESTED
     assert suggestion.confirmed is False
+
+    persisted = CandidateProfile.model_validate_json(result.model_dump_json())
+    assert persisted == result
 
     repeated = confirm_claims(
         result, [ClaimDecision(claim_id="memory-1", action="accept")]
@@ -205,6 +212,72 @@ def test_refresh_reports_conflict_without_overwrite() -> None:
     assert preview.changed_claim_ids == []
     assert profile.model_dump() == profile_before
     assert profile.claims[0].value == "Applied AI PM"
+
+
+def test_same_source_same_id_refresh_is_an_explicit_candidate_subject() -> None:
+    original = memory_claim("memory-1", "preferred_role", "Applied AI PM")
+    initial_preview = preview_memory_import(
+        CandidateProfile(), "career-agent", ["preferences"], [original]
+    )
+    initial = confirm_claims(
+        CandidateProfile(),
+        [ClaimDecision(claim_id="memory-1", action="accept")],
+        preview=initial_preview,
+    )
+    changed = memory_claim("memory-1", "preferred_role", "ML Engineer")
+    refresh = preview_memory_import(
+        initial, "career-agent", ["preferences"], [changed]
+    )
+
+    assert refresh.changed_claim_ids == ["memory-1"]
+    assert refresh.conflicting_claim_ids == ["memory-1"]
+    with pytest.raises(ValueError, match="conflict"):
+        confirm_claims(
+            initial,
+            [ClaimDecision(claim_id="memory-1", action="accept")],
+            preview=refresh,
+        )
+
+    resolved = confirm_claims(
+        initial,
+        [
+            ClaimDecision(
+                claim_id="memory-1", action="edit", edited_value="Applied AI PM"
+            )
+        ],
+        preview=refresh,
+    )
+
+    retained = next(claim for claim in resolved.claims if claim.id == "memory-1")
+    confirmed = [claim for claim in resolved.claims if claim.confirmed]
+    assert retained.value == "ML Engineer"
+    assert len(confirmed) == 2
+    assert all(claim.value == "Applied AI PM" for claim in confirmed)
+
+    disconnected = disconnect_memory_source(resolved, "career-agent", True)
+    assert [claim.id for claim in disconnected.claims] == ["memory-1"]
+
+
+def test_cross_pool_id_collision_is_rejected_when_identity_is_ambiguous() -> None:
+    manual = CandidateClaim(
+        id="memory-1",
+        claim_type="location",
+        value="Remote",
+        source=ClaimSource.USER_CONFIRMED,
+        confirmed=True,
+    )
+    candidate = memory_claim("memory-1", "location", "Remote")
+    profile = CandidateProfile(claims=[manual])
+    preview = preview_memory_import(
+        profile, "career-agent", ["preferences"], [candidate]
+    )
+
+    with pytest.raises(ValueError, match="ambiguous cross-pool"):
+        confirm_claims(
+            profile,
+            [ClaimDecision(claim_id="memory-1", action="accept")],
+            preview=preview,
+        )
 
 
 def test_conflicting_confirmations_are_atomic_and_order_invariant() -> None:
@@ -282,8 +355,37 @@ def test_conflict_requires_reject_or_edit_to_existing_value() -> None:
         preview=preview,
     )
 
-    assert [claim.id for claim in resolved.claims] == ["manual-1", "memory-2"]
+    assert [claim.id for claim in resolved.claims[:2]] == ["manual-1", "memory-2"]
+    assert len([claim for claim in resolved.claims if claim.confirmed]) == 2
+    imported = resolved.claims[-1]
+    assert imported.source_agent == "career-agent"
+    assert imported.provenance == candidate.provenance
     assert rejected == profile
+
+
+def test_same_value_accepts_preserve_each_candidate_provenance_record() -> None:
+    career = memory_claim("career-1", "location", "Remote", "career-agent")
+    learning = memory_claim("learning-1", "location", "Remote", "learning-agent")
+    profile = CandidateProfile(claims=[career, learning])
+
+    result = confirm_claims(
+        profile,
+        [
+            ClaimDecision(claim_id="career-1", action="accept"),
+            ClaimDecision(claim_id="learning-1", action="accept"),
+        ],
+    )
+
+    confirmed = [claim for claim in result.claims if claim.confirmed]
+    assert len(confirmed) == 2
+    assert {claim.source_agent for claim in confirmed} == {
+        "career-agent",
+        "learning-agent",
+    }
+    assert {claim.provenance for claim in confirmed} == {
+        career.provenance,
+        learning.provenance,
+    }
 
 
 def test_disconnect_can_remove_only_selected_source() -> None:
@@ -330,7 +432,12 @@ def test_disconnect_can_remove_only_selected_source() -> None:
 
     assert unchanged == profile
     remaining_ids = [claim.id for claim in disconnected.claims]
-    assert CONFIRMED_MEMORY_1_ID not in remaining_ids
+    career_confirmed_id = next(
+        claim.id
+        for claim in profile.claims
+        if claim.confirmed and claim.source_agent == "career-agent"
+    )
+    assert career_confirmed_id not in remaining_ids
     assert "memory-1" in remaining_ids
     assert "memory-2" in remaining_ids
     assert spoofed_manual.id in remaining_ids
@@ -340,6 +447,21 @@ def test_disconnect_can_remove_only_selected_source() -> None:
         for claim in disconnected.claims
     )
     assert len(profile.claims) == 6
+
+
+def test_disconnect_preserves_forged_pair_with_different_manual_value() -> None:
+    suggestion = memory_claim("forged-source", "location", "Remote")
+    imported = confirm_claims(
+        CandidateProfile(claims=[suggestion]),
+        [ClaimDecision(claim_id="forged-source", action="accept")],
+    )
+    template = next(claim for claim in imported.claims if claim.confirmed)
+    forged = template.model_copy(update={"value": "On-site"}, deep=True)
+    profile = CandidateProfile(claims=[suggestion, forged])
+
+    disconnected = disconnect_memory_source(profile, "career-agent", True)
+
+    assert disconnected == profile
 
 
 def test_memory_candidate_provenance_must_match_selected_agent() -> None:

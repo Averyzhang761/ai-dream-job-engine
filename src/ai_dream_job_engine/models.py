@@ -58,6 +58,15 @@ class ScoringDirection(StrEnum):
     LOWER_IS_BETTER = "lower_is_better"
 
 
+class ClaimImportOrigin(DomainModel):
+    source_agent: str = Field(min_length=1)
+    candidate_id: str = Field(min_length=1)
+    provenance: str = Field(min_length=1)
+    claim_type: str = Field(min_length=1)
+    candidate_value: Any
+    confirmed_value: Any
+
+
 class CandidateClaim(DomainModel):
     id: str = Field(min_length=1)
     claim_type: str = Field(min_length=1)
@@ -69,6 +78,7 @@ class CandidateClaim(DomainModel):
     source_agent: str | None = None
     observed_at: datetime | None = None
     confidence: float | None = Field(default=None, ge=0, le=1)
+    import_origin: ClaimImportOrigin | None = None
 
     @model_validator(mode="after")
     def agent_suggestions_are_not_directly_confirmed(self) -> CandidateClaim:
@@ -77,6 +87,10 @@ class CandidateClaim(DomainModel):
                 "agent_suggested claims cannot be confirmed directly; "
                 "confirmation creates a user_confirmed claim"
             )
+        if self.import_origin is not None and (
+            self.source is not ClaimSource.USER_CONFIRMED or not self.confirmed
+        ):
+            raise ValueError("import_origin requires a confirmed user_confirmed claim")
         return self
 
 

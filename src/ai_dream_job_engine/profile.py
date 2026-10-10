@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 from ai_dream_job_engine.models import (
     CandidateClaim,
     CandidateProfile,
+    ClaimImportOrigin,
     ClaimDecision,
     ClaimSource,
     DataClass,
@@ -72,6 +73,9 @@ def _validate_profile(profile: CandidateProfile) -> None:
         raise ValueError(f"duplicate profile claim IDs: {', '.join(duplicates)}")
     for claim in profile.claims:
         _canonical_value(claim.value)
+        if claim.import_origin is not None:
+            _canonical_value(claim.import_origin.candidate_value)
+            _canonical_value(claim.import_origin.confirmed_value)
 
 
 def _validate_memory_candidate(
@@ -81,6 +85,8 @@ def _validate_memory_candidate(
         raise ValueError("memory candidates must be agent_suggested")
     if candidate.confirmed:
         raise ValueError("memory candidates must be unconfirmed")
+    if candidate.import_origin is not None:
+        raise ValueError("memory candidates cannot carry import_origin")
     if candidate.source_agent != source_agent:
         raise ValueError("memory candidate source_agent does not match import source")
     provenance = urlsplit(candidate.provenance or "")
@@ -170,13 +176,14 @@ def preview_memory_import(
             continue
         seen_keys.add(key)
 
+        existing = existing_by_id.get(candidate.id)
+        if existing is not None and _normalized_claim_key(existing) != key:
+            changed.append(candidate.id)
+
         active_keys = active_by_type.get(key[0], set())
         if active_keys and key not in active_keys:
             conflicting.append(candidate.id)
-        elif candidate.id in existing_by_id:
-            if _normalized_claim_key(existing_by_id[candidate.id]) != key:
-                changed.append(candidate.id)
-        elif key not in existing_keys:
+        elif existing is None and key not in existing_keys:
             added.append(candidate.id)
 
     return MemoryImportPreview(
@@ -189,19 +196,42 @@ def preview_memory_import(
     )
 
 
-def _confirmed_claim_id(candidate: CandidateClaim) -> str:
+def _import_origin(candidate: CandidateClaim, value: Any) -> ClaimImportOrigin:
+    return ClaimImportOrigin(
+        source_agent=candidate.source_agent,
+        candidate_id=candidate.id,
+        provenance=candidate.provenance,
+        claim_type=candidate.claim_type,
+        candidate_value=candidate.value,
+        confirmed_value=value,
+    )
+
+
+def _confirmed_claim_id(
+    candidate: CandidateClaim, origin: ClaimImportOrigin
+) -> str:
     source = json.dumps(
-        [candidate.source_agent, candidate.id],
+        {
+            "origin": origin.model_dump(mode="json"),
+            "source_quote": candidate.source_quote,
+            "observed_at": (
+                candidate.observed_at.isoformat() if candidate.observed_at else None
+            ),
+            "confidence": candidate.confidence,
+        },
         ensure_ascii=False,
         separators=(",", ":"),
+        sort_keys=True,
     ).encode()
     return f"agent-import:{hashlib.sha256(source).hexdigest()}"
 
 
 def _confirmed_claim(candidate: CandidateClaim, value: Any) -> CandidateClaim:
     if candidate.source is ClaimSource.AGENT_SUGGESTED:
-        claim_id = _confirmed_claim_id(candidate)
+        origin = _import_origin(candidate, value)
+        claim_id = _confirmed_claim_id(candidate, origin)
     else:
+        origin = None
         source = json.dumps(
             [candidate.source.value, candidate.id],
             ensure_ascii=False,
@@ -215,6 +245,7 @@ def _confirmed_claim(candidate: CandidateClaim, value: Any) -> CandidateClaim:
             "value": value,
             "source": ClaimSource.USER_CONFIRMED,
             "confirmed": True,
+            "import_origin": origin,
         },
     )
 
@@ -249,15 +280,22 @@ def confirm_claims(
     preview_candidates = preview.candidates if preview else []
     if preview:
         _validate_candidates(preview_candidates, preview.source_agent)
+    profile_by_id = {claim.id: claim for claim in profile.claims}
+    preview_by_id = {claim.id: claim for claim in preview_candidates}
     preview_ids = {claim.id for claim in preview_candidates}
-    duplicate_pool_ids = {claim.id for claim in profile.claims} & preview_ids
-    if duplicate_pool_ids:
-        joined = ", ".join(sorted(duplicate_pool_ids))
-        raise ValueError(f"duplicate candidate IDs: {joined}")
+    for claim_id in profile_by_id.keys() & preview_ids:
+        existing = profile_by_id[claim_id]
+        incoming = preview_by_id[claim_id]
+        if (
+            existing.source is not ClaimSource.AGENT_SUGGESTED
+            or existing.confirmed
+            or existing.source_agent != incoming.source_agent
+            or existing.provenance != incoming.provenance
+        ):
+            raise ValueError(f"ambiguous cross-pool candidate ID: {claim_id}")
+        _validate_memory_candidate(existing, preview.source_agent)
 
-    candidates_by_id = {
-        claim.id: claim for claim in [*profile.claims, *preview_candidates]
-    }
+    candidates_by_id = {**profile_by_id, **preview_by_id}
     unknown_ids = {decision.claim_id for decision in decisions} - candidates_by_id.keys()
     if unknown_ids:
         raise ValueError(f"unknown claim IDs: {', '.join(sorted(unknown_ids))}")
@@ -292,11 +330,9 @@ def confirm_claims(
         active_by_type.setdefault(key[0], set()).add(key)
 
     proposed_by_type: dict[str, set[tuple[str, Hashable]]] = {}
-    proposed_by_key: dict[tuple[str, Hashable], list[CandidateClaim]] = {}
     for _, confirmed in accepted:
         key = _normalized_claim_key(confirmed)
         proposed_by_type.setdefault(key[0], set()).add(key)
-        proposed_by_key.setdefault(key, []).append(confirmed)
 
     all_types = active_by_type.keys() | proposed_by_type.keys()
     if any(
@@ -310,19 +346,24 @@ def confirm_claims(
         raise ValueError("confirmation conflict requires reject or edit resolution")
 
     existing_by_id = {claim.id: claim for claim in profile.claims}
+    base_claims = [
+        (
+            preview_by_id[claim.id].model_copy(deep=True)
+            if claim.id in accepted_preview_ids
+            else claim.model_copy(deep=True)
+        )
+        for claim in profile.claims
+    ]
     new_suggestions = sorted(
         (
             claim.model_copy(deep=True)
             for claim in preview_candidates
-            if claim.id in accepted_preview_ids
+            if claim.id in accepted_preview_ids and claim.id not in profile_by_id
         ),
         key=lambda claim: claim.id,
     )
     new_confirmed: list[CandidateClaim] = []
-    for key, matching in sorted(proposed_by_key.items(), key=lambda item: repr(item[0])):
-        if key in active_keys:
-            continue
-        confirmed = min(matching, key=lambda claim: claim.id)
+    for _, confirmed in sorted(accepted, key=lambda pair: pair[1].id):
         existing = existing_by_id.get(confirmed.id)
         if existing is not None:
             if existing != confirmed:
@@ -331,7 +372,7 @@ def confirm_claims(
         new_confirmed.append(confirmed)
 
     claims = [
-        *(claim.model_copy(deep=True) for claim in profile.claims),
+        *base_claims,
         *new_suggestions,
         *new_confirmed,
     ]
@@ -342,25 +383,29 @@ def confirm_claims(
     return result
 
 
-def _is_linked_import(
-    claim: CandidateClaim, suggestion: CandidateClaim, source_agent: str
-) -> bool:
-    if suggestion.source_agent != source_agent:
+def _is_linked_import(claim: CandidateClaim, source_agent: str) -> bool:
+    origin = claim.import_origin
+    if origin is None or origin.source_agent != source_agent:
         return False
     try:
-        _validate_memory_candidate(suggestion, source_agent)
+        _canonical_value(origin.candidate_value)
+        confirmed_value_matches = _canonical_value(
+            origin.confirmed_value
+        ) == _canonical_value(claim.value)
     except ValueError:
         return False
+    provenance = urlsplit(origin.provenance)
     return (
-        claim.id == _confirmed_claim_id(suggestion)
+        provenance.scheme == "agent-memory"
+        and provenance.netloc == source_agent
+        and provenance.path == f"/{origin.candidate_id}"
+        and confirmed_value_matches
+        and claim.id == _confirmed_claim_id(claim, origin)
         and claim.source is ClaimSource.USER_CONFIRMED
         and claim.confirmed
-        and claim.claim_type == suggestion.claim_type
-        and claim.source_quote == suggestion.source_quote
-        and claim.provenance == suggestion.provenance
-        and claim.source_agent == suggestion.source_agent
-        and claim.observed_at == suggestion.observed_at
-        and claim.confidence == suggestion.confidence
+        and claim.claim_type == origin.claim_type
+        and claim.provenance == origin.provenance
+        and claim.source_agent == origin.source_agent
     )
 
 
@@ -373,17 +418,9 @@ def disconnect_memory_source(
     if not delete_imported:
         return profile.model_copy(deep=True)
 
-    suggestions = [
-        claim
-        for claim in profile.claims
-        if claim.source is ClaimSource.AGENT_SUGGESTED and not claim.confirmed
-    ]
     claims = [
         claim.model_copy(deep=True)
         for claim in profile.claims
-        if not any(
-            _is_linked_import(claim, suggestion, source_agent)
-            for suggestion in suggestions
-        )
+        if not _is_linked_import(claim, source_agent)
     ]
     return profile.model_copy(update={"claims": claims}, deep=True)
