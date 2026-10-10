@@ -15,6 +15,9 @@
 - Work only in `ai-dream-job-engine`; do not modify `ai-job-fit-analyzer-submission`.
 - Do not copy the old repository's Git history, real JD dataset, personal job library, credentials, logs, cache, or virtual environment.
 - Personal state is local SQLite; API keys come only from environment variables or host secret storage.
+- Remote providers receive public JD content by default, never the full Candidate Profile. Full resume transmission requires a separate disclosure and explicit user confirmation.
+- JEV receives JD content and configured decision questions only; it never receives resume, Agent-memory, email, or Candidate Profile data.
+- No telemetry. Logs redact restricted personal data and credentials.
 - Agent memory import is off by default. The MCP server receives only user-authorized candidate claims supplied by the host Agent; it never scans host memory.
 - Scheduling belongs to the host Agent. The plugin must not create its own scheduler, heartbeat process, or notification center.
 - Future automation-facing workflows must use `no_change`, `updated`, `needs_review`, or `failed`; `no_change` is quiet by default and consequential actions still require user confirmation.
@@ -32,6 +35,7 @@
 - Missing or unknown facts must stay unknown and trigger review where configured, never silently become a pass or hard failure; Tasks 3 and 5 pin this behavior.
 - A confirmed hard-constraint conflict must override otherwise high scores; Task 5 pins this behavior.
 - Malformed model output or a quote not found in the source JD must fail safely and must not persist a successful decision; Tasks 6 and 7 pin this behavior.
+- A provider payload must contain only the data classes approved for that operation; Tasks 6 and 7 pin this behavior.
 
 ---
 
@@ -93,7 +97,7 @@ ai-dream-job-engine/
 
 **Interfaces:**
 - Consumes: Approved design specification.
-- Produces: Pydantic models `CandidateClaim`, `CandidateProfile`, `FactDefinition`, `ValueDimension`, `DecisionQuestion`, `Rubric`, `ExtractedFact`, `DecisionSignal`, `Gap`, and `DecisionResult`; protocols `JobFactExtractor`, `CandidateClaimExtractor`, and `DecisionSignalProvider`.
+- Produces: Pydantic models `CandidateClaim`, `CandidateProfile`, `FactDefinition`, `ValueDimension`, `DecisionQuestion`, `Rubric`, `ExtractedFact`, `DecisionSignal`, `Gap`, `DecisionResult`, and `OutboundDisclosure`; protocols `JobFactExtractor`, `CandidateClaimExtractor`, and `DecisionSignalProvider`.
 
 - [ ] **Step 1: Create the package metadata and failing model tests**
 
@@ -116,6 +120,7 @@ ai-dream-job-engine/
   - `GapKind`: `preference_mismatch`, `hard_blocker`, `capability_gap`, `evidence_gap`.
   - `RecommendationLevel`: `priority_apply`, `apply_after_review`, `hold`, `skip`.
   - `SignalStatus`: `available`, `unavailable`, `invalid`.
+  - `DataClass`: `public_job_data`, `selected_candidate_claims`, `restricted_personal_data`.
 
   Protocol signatures:
 
@@ -218,7 +223,7 @@ ai-dream-job-engine/
 
 - [ ] **Step 1: Write failing profile and consent tests**
 
-  Add `test_resume_claims_keep_exact_source_quote`, `test_memory_import_is_preview_only`, `test_unconfirmed_memory_claim_is_not_active`, `test_confirmed_memory_claim_becomes_user_confirmed_and_keeps_provenance`, `test_refresh_reports_conflict_without_overwrite`, and `test_disconnect_can_remove_only_selected_source`.
+  Add `test_resume_claims_keep_exact_source_quote`, `test_memory_import_is_preview_only`, `test_unconfirmed_memory_claim_is_not_active`, `test_confirmed_memory_claim_becomes_user_confirmed_and_keeps_provenance`, `test_remote_resume_extraction_requires_explicit_disclosure_confirmation`, `test_refresh_reports_conflict_without_overwrite`, and `test_disconnect_can_remove_only_selected_source`.
 
 - [ ] **Step 2: Run tests and verify they fail**
 
@@ -228,7 +233,7 @@ ai-dream-job-engine/
 
 - [ ] **Step 3: Implement profile proposal, diff, confirmation, and disconnect logic**
 
-  The service receives candidate memory claims from the host Agent; it never reads Agent memory itself. Deduplicate by normalized claim key, preserve every source, and require an explicit `ClaimDecision` before changing active profile data.
+  The service receives candidate memory claims from the host Agent; it never reads Agent memory itself. Deduplicate by normalized claim key, preserve every source, and require an explicit `ClaimDecision` before changing active profile data. A remote resume extractor cannot run without a confirmed `OutboundDisclosure` naming the provider, fields, purpose, and `restricted_personal_data` classification.
 
 - [ ] **Step 4: Run profile tests**
 
@@ -297,7 +302,7 @@ ai-dream-job-engine/
 
 - [ ] **Step 1: Write failing adapter tests with no network access**
 
-  Add `test_openai_direct_uses_official_base_url`, `test_openrouter_uses_openrouter_base_url`, `test_provider_returns_validated_job_facts`, `test_quote_not_in_jd_is_rejected`, `test_malformed_structured_output_raises_provider_error`, `test_jev_maps_noul_probability`, `test_jev_missing_answer_returns_invalid_signal`, and `test_missing_api_key_fails_before_network_call`.
+  Add `test_openai_direct_uses_official_base_url`, `test_openrouter_uses_openrouter_base_url`, `test_job_extraction_payload_excludes_candidate_profile`, `test_provider_returns_validated_job_facts`, `test_quote_not_in_jd_is_rejected`, `test_malformed_structured_output_raises_provider_error`, `test_jev_payload_contains_only_jd_and_questions`, `test_jev_maps_noul_probability`, `test_jev_missing_answer_returns_invalid_signal`, and `test_missing_api_key_fails_before_network_call`.
 
   Inject fake OpenAI clients and `httpx.MockTransport`; never call live services in unit tests.
 
@@ -335,7 +340,7 @@ ai-dream-job-engine/
 
 - [ ] **Step 1: Write failing orchestration tests with fake providers**
 
-  Add `test_analyze_job_runs_extract_signals_decide_and_persist`, `test_recompute_reuses_normalized_inputs_without_model_calls`, `test_missing_profile_returns_actionable_error`, `test_invalid_quote_does_not_persist_success`, `test_provider_failure_records_failure_not_decision`, and `test_trace_contains_provider_rubric_prompt_and_result_versions`.
+  Add `test_analyze_job_runs_extract_signals_decide_and_persist`, `test_recompute_reuses_normalized_inputs_without_model_calls`, `test_missing_profile_returns_actionable_error`, `test_invalid_quote_does_not_persist_success`, `test_provider_failure_records_failure_not_decision`, `test_trace_records_outbound_data_class_without_raw_restricted_content`, and `test_trace_contains_provider_rubric_prompt_and_result_versions`.
 
 - [ ] **Step 2: Run tests and verify they fail**
 
@@ -432,7 +437,7 @@ ai-dream-job-engine/
 
 - [ ] **Step 4: Add open-source documentation and privacy boundaries**
 
-  README sections: product thesis, what is different, installation, model configuration, memory-consent flow, one-JD quickstart, evidence boundaries, local data location, evaluation method, limitations, and deferred roadmap. Use the MIT license. Ignore `.env`, SQLite files, local evaluation cases/reports, resume files, caches, and virtual environments.
+  README sections: product thesis, what is different, installation, model configuration, memory-consent flow, one-JD quickstart, evidence boundaries, privacy data classes and outbound disclosures, local data location, evaluation method, limitations, and deferred roadmap. Use the MIT license. Ignore `.env`, SQLite files, local evaluation cases/reports, resume files, caches, and virtual environments.
 
 - [ ] **Step 5: Run all static and automated checks**
 
