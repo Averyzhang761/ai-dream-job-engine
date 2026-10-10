@@ -1,0 +1,6 @@
+{
+  "name": "ai-dream-job-engine",
+  "version": "0.1.0",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json"
+}
