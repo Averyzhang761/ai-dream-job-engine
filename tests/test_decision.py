@@ -41,6 +41,8 @@ def _rubric() -> Rubric:
                 definition="Whether Python capability is required.",
                 data_type="boolean",
                 extraction_instructions="Extract the Python requirement.",
+                candidate_comparison="exact",
+                qualification_weight=1,
             ),
             FactDefinition(
                 id="work_authorized",
@@ -48,6 +50,8 @@ def _rubric() -> Rubric:
                 definition="Whether the required authorization must be held.",
                 data_type="boolean",
                 extraction_instructions="Extract the authorization requirement.",
+                candidate_comparison="exact",
+                qualification_weight=1,
             ),
         ],
         dimensions=[
@@ -152,6 +156,19 @@ def _strong_claims() -> list[CandidateClaim]:
 def _with_fact_type(fact: FactDefinition, data_type: str) -> FactDefinition:
     payload = fact.model_dump(mode="python")
     payload["data_type"] = data_type
+    return FactDefinition.model_validate(payload)
+
+
+def _with_candidate_policy(
+    fact: FactDefinition,
+    candidate_comparison: str,
+    qualification_weight: float,
+) -> FactDefinition:
+    payload = fact.model_dump(mode="python")
+    payload.update(
+        candidate_comparison=candidate_comparison,
+        qualification_weight=qualification_weight,
+    )
     return FactDefinition.model_validate(payload)
 
 
@@ -459,6 +476,8 @@ def test_unreferenced_required_fact_still_requires_review() -> None:
             definition="A required fact outside all dimensions.",
             data_type="boolean",
             extraction_instructions="Extract the requirement.",
+            candidate_comparison="exact",
+            qualification_weight=1,
         )
     )
 
@@ -513,18 +532,33 @@ def test_zero_weight_dimension_is_disabled() -> None:
     assert all(gap.subject_id not in {"preferred_role", "preference_signal"} for gap in result.gaps)
 
 
-def test_zero_weight_hard_dimension_cannot_create_hard_blocker() -> None:
+def test_zero_weight_fact_without_qualification_policy_is_disabled() -> None:
     rubric = _rubric()
-    rubric.facts[2] = rubric.facts[2].model_copy(update={"requires_evidence": False})
-    rubric.dimensions[2] = rubric.dimensions[2].model_copy(update={"weight": 0})
+    rubric.facts[1] = _with_candidate_policy(rubric.facts[1], "none", 0)
+    rubric.dimensions[1] = rubric.dimensions[1].model_copy(update={"weight": 0})
+    facts = [fact for fact in _facts() if fact.fact_id != "python_required"]
+    claims = [_strong_claims()[1]]
+
+    result = decide_job(facts, _signals(), CandidateProfile(claims=claims), rubric)
+
+    assert all(gap.subject_id != "python_required" for gap in result.gaps)
+    assert all(
+        item.subject_id != "python_required"
+        for item in result.qualification_contributions
+    )
+
+
+def test_explicit_qualification_survives_zero_weight_dimension() -> None:
+    rubric = _rubric()
+    rubric.dimensions[1] = rubric.dimensions[1].model_copy(update={"weight": 0})
     claims = [
-        _strong_claims()[0],
-        _claim("claim-auth", "work_authorized", False, ClaimSource.USER_CONFIRMED),
+        _claim("claim-python", "python_required", False),
+        _strong_claims()[1],
     ]
 
     result = decide_job(_facts(), _signals(), CandidateProfile(claims=claims), rubric)
 
-    assert all(gap.kind is not GapKind.HARD_BLOCKER for gap in result.gaps)
+    assert any(gap.kind is GapKind.CAPABILITY_GAP for gap in result.gaps)
 
 
 def test_stale_signal_question_version_requires_review() -> None:
@@ -599,6 +633,126 @@ def test_complete_favorable_default_rubric_fixture_is_priority_apply() -> None:
     assert result.preference_score == 1
     assert result.qualification_score == 1
     assert result.gaps == []
+
+
+def test_default_preference_and_synonym_differences_are_not_capability_gaps() -> None:
+    rubric = load_default_rubric()
+    values = {
+        "role_family": "applied AI",
+        "ai_scope": "LLM evaluation",
+        "product_customer_scope": "customers",
+        "ownership_scope": "own launch",
+        "infrastructure_scope": "model serving",
+        "work_arrangement_terms": ["remote"],
+        "compensation_terms": "salary range",
+        "work_authorization_requirement": ["sponsorship available"],
+    }
+    candidate_values = {
+        **values,
+        "role_family": "machine learning engineer",
+        "work_arrangement_terms": ["onsite"],
+        "compensation_terms": "different compensation preference",
+    }
+    facts = [
+        _fact(fact.id, values[fact.id], f"JD evidence:{fact.id}")
+        for fact in rubric.facts
+    ]
+    claims = [
+        _claim(f"claim:{fact.id}", fact.id, candidate_values[fact.id])
+        for fact in rubric.facts
+    ]
+    signals = [
+        DecisionSignal(
+            question_id=question.id,
+            question_version=question.version,
+            probability=0 if question.id == "pure_infrastructure" else 1,
+            evidence=[f"signal evidence:{question.id}"],
+        )
+        for question in rubric.questions
+    ]
+
+    result = decide_job(facts, signals, CandidateProfile(claims=claims), rubric)
+
+    assert result.recommendation is RecommendationLevel.PRIORITY_APPLY
+    assert all(gap.kind is not GapKind.CAPABILITY_GAP for gap in result.gaps)
+
+
+def test_empty_default_authorization_list_is_unrestricted() -> None:
+    rubric = load_default_rubric()
+    fact = _fact(
+        "work_authorization_requirement",
+        [],
+        "JD states no authorization restriction",
+    )
+    claim = _claim(
+        "claim-auth",
+        "work_authorization_requirement",
+        ["requires sponsorship"],
+        ClaimSource.USER_CONFIRMED,
+    )
+    other_facts = [
+        ExtractedFact(fact_id=item.id, is_unknown=True, evidence=["not needed here"])
+        for item in rubric.facts
+        if item.id != fact.fact_id
+    ]
+
+    result = decide_job(
+        [fact, *other_facts],
+        [],
+        CandidateProfile(claims=[claim]),
+        rubric,
+    )
+
+    assert all(gap.kind is not GapKind.HARD_BLOCKER for gap in result.gaps)
+
+
+def test_nonempty_allowed_authorization_requires_candidate_overlap() -> None:
+    rubric = load_default_rubric()
+    facts = [
+        ExtractedFact(fact_id=item.id, is_unknown=True, evidence=["not needed here"])
+        for item in rubric.facts
+    ]
+    auth_index = next(
+        index
+        for index, fact in enumerate(facts)
+        if fact.fact_id == "work_authorization_requirement"
+    )
+    facts[auth_index] = _fact(
+        "work_authorization_requirement",
+        ["citizen"],
+        "JD requires citizenship",
+    )
+    claim = _claim(
+        "claim-auth",
+        "work_authorization_requirement",
+        ["requires sponsorship"],
+        ClaimSource.USER_CONFIRMED,
+    )
+
+    result = decide_job(facts, [], CandidateProfile(claims=[claim]), rubric)
+
+    assert result.recommendation is RecommendationLevel.SKIP
+    assert any(gap.kind is GapKind.HARD_BLOCKER for gap in result.gaps)
+
+
+def test_hard_blocker_preserves_simultaneous_evidence_gap_and_review_state() -> None:
+    claims = [
+        _claim(
+            "claim-auth",
+            "work_authorized",
+            False,
+            ClaimSource.USER_CONFIRMED,
+        )
+    ]
+
+    result = decide_job(_facts(), _signals(), CandidateProfile(claims=claims), _rubric())
+
+    assert result.recommendation is RecommendationLevel.SKIP
+    assert result.needs_review is True
+    assert {gap.kind for gap in result.gaps} == {
+        GapKind.EVIDENCE_GAP,
+        GapKind.HARD_BLOCKER,
+    }
 
 
 def test_empty_confirmed_list_is_an_explicit_capability_gap() -> None:

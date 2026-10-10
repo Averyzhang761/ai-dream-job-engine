@@ -128,11 +128,26 @@ class FactDefinition(DomainModel):
     missing_policy: Literal["unknown", "default"] = "unknown"
     default_value: Any | None = None
     enum_values: list[str] = Field(default_factory=list)
+    candidate_comparison: Literal["none", "exact", "allowed_alternatives"] = "none"
+    qualification_weight: float = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def configured_defaults_have_a_value(self) -> FactDefinition:
         if self.missing_policy == "default" and self.default_value is None:
             raise ValueError("default_value is required when missing_policy is default")
+        if self.candidate_comparison == "none" and self.qualification_weight != 0:
+            raise ValueError(
+                "qualification_weight must be zero without candidate comparison"
+            )
+        if self.candidate_comparison != "none" and self.qualification_weight <= 0:
+            raise ValueError(
+                "qualification_weight must be positive for candidate comparison"
+            )
+        if (
+            self.candidate_comparison == "allowed_alternatives"
+            and self.data_type is not FactDataType.LIST
+        ):
+            raise ValueError("allowed_alternatives requires list data_type")
         return self
 
 

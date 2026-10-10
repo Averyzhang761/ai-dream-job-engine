@@ -89,6 +89,8 @@ def _validate_rubric(rubric: Rubric) -> None:
     signal_ids = {question.id for question in rubric.questions}
     for fact in rubric.facts:
         _validate_fact_default(fact)
+        if not math.isfinite(fact.qualification_weight):
+            raise ValueError(f"fact {fact.id} qualification_weight must be finite")
 
     for dimension in rubric.dimensions:
         if not math.isfinite(dimension.weight):
@@ -123,6 +125,8 @@ def _validate_rubric(rubric: Rubric) -> None:
             "recommendation thresholds must satisfy priority_apply > "
             "apply_after_review > hold > skip"
         )
+    if thresholds[RecommendationLevel.SKIP] != 0:
+        raise ValueError("skip threshold must be zero")
 
 
 def _validate_fact_default(fact: FactDefinition) -> None:

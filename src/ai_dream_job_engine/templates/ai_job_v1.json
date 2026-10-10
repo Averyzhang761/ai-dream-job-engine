@@ -88,7 +88,9 @@
       "requires_evidence": true,
       "missing_policy": "unknown",
       "default_value": null,
-      "enum_values": []
+      "enum_values": [],
+      "candidate_comparison": "allowed_alternatives",
+      "qualification_weight": 1.0
     }
   ],
   "dimensions": [

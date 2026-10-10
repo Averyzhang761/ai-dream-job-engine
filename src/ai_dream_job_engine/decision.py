@@ -64,7 +64,8 @@ def decide_job(
     qualification_score = _weighted(qualification)
 
     if blockers:
-        recommendation, gaps = RecommendationLevel.SKIP, blockers
+        recommendation = RecommendationLevel.SKIP
+        gaps = [*preference_gaps, *qualification_gaps, *blockers]
     else:
         gaps = [*preference_gaps, *qualification_gaps]
         if any(gap.kind is GapKind.EVIDENCE_GAP for gap in gaps):
@@ -88,7 +89,10 @@ def decide_job(
         preference_contributions=preference,
         qualification_contributions=qualification,
         rubric_version=rubric.version,
-        needs_review=(recommendation is RecommendationLevel.APPLY_AFTER_REVIEW),
+        needs_review=(
+            recommendation is RecommendationLevel.APPLY_AFTER_REVIEW
+            or any(gap.kind is GapKind.EVIDENCE_GAP for gap in gaps)
+        ),
     )
 
 
@@ -256,26 +260,38 @@ def _qualification(
     contributions: list[DecisionContribution] = []
     gaps: list[Gap] = []
     blockers: list[Gap] = []
-    dimensions = [item for item in rubric.dimensions if item.weight > 0]
     for definition in sorted(rubric.facts, key=lambda item: item.id):
-        if not definition.requires_evidence:
+        if definition.candidate_comparison == "none":
             continue
         fact = inputs.facts[definition.id]
         if not fact.ready:
             gaps.append(_missing_gap(definition.id, [definition.id], fact.evidence, fact.missing_evidence))
             continue
         claims = inputs.claims.get(definition.id, ())
-        conflicts = [item for item in claims if item.ready and not _compatible(fact.value, item.value)]
-        matches = [item for item in claims if item.ready and _compatible(fact.value, item.value)]
+        conflicts = [
+            item
+            for item in claims
+            if item.ready
+            and not _compatible(
+                fact.value, item.value, definition.candidate_comparison
+            )
+        ]
+        matches = [
+            item
+            for item in claims
+            if item.ready
+            and _compatible(fact.value, item.value, definition.candidate_comparison)
+        ]
         unresolved = [item for item in claims if not item.ready]
-        weight = sum(
-            item.weight for item in dimensions if definition.id in item.fact_ids
-        ) or 1.0
+        weight = definition.qualification_weight
         if conflicts:
             claim = conflicts[0]
             contribution = _qualification_contribution(definition.id, fact, claim, 0, weight)
             contributions.append(contribution)
-            hard = any(item.hard_constraint and definition.id in item.fact_ids for item in dimensions)
+            hard = any(
+                item.hard_constraint and definition.id in item.fact_ids
+                for item in rubric.dimensions
+            )
             gap = Gap(
                 kind=GapKind.HARD_BLOCKER if hard else GapKind.CAPABILITY_GAP,
                 subject_id=definition.id,
@@ -301,12 +317,14 @@ def _qualification(
     return contributions, _sort_gaps(gaps), _sort_gaps(blockers)
 
 
-def _compatible(required: Any, candidate: Any) -> bool:
-    if isinstance(required, tuple):
+def _compatible(required: Any, candidate: Any, policy: str) -> bool:
+    if policy == "allowed_alternatives":
         required_set = {item.casefold() for item in required}
         candidate_set = {item.casefold() for item in candidate}
-        return bool(required_set & candidate_set) or (
-            not required_set and not candidate_set
+        return not required_set or bool(required_set & candidate_set)
+    if isinstance(required, tuple):
+        return tuple(item.casefold() for item in required) == tuple(
+            item.casefold() for item in candidate
         )
     if isinstance(required, str):
         return required.casefold() == candidate.casefold()
@@ -374,7 +392,7 @@ def _recommend(
     for level in RecommendationLevel:
         if score >= rubric.recommendation_thresholds[level]:
             return level
-    raise ValueError("recommendation thresholds do not cover the score range")
+    return RecommendationLevel.SKIP
 
 
 def _unique(items: Iterable[Any], field: str, label: str) -> dict[str, Any]:

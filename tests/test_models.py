@@ -67,6 +67,50 @@ def test_fact_definition_rejects_unknown_type() -> None:
         )
 
 
+def test_fact_definition_requires_explicit_qualification_policy_and_weight() -> None:
+    preference = FactDefinition(
+        id="role",
+        name="Role",
+        definition="Role family.",
+        data_type="text",
+        extraction_instructions="Extract role family.",
+    )
+    qualification = FactDefinition(
+        id="authorization",
+        name="Authorization",
+        definition="Allowed authorization paths.",
+        data_type="list",
+        extraction_instructions="Extract allowed paths.",
+        candidate_comparison="allowed_alternatives",
+        qualification_weight=1,
+    )
+
+    assert preference.candidate_comparison == "none"
+    assert preference.qualification_weight == 0
+    assert qualification.candidate_comparison == "allowed_alternatives"
+
+    with pytest.raises(ValidationError, match="qualification_weight"):
+        FactDefinition(
+            id="invalid",
+            name="Invalid",
+            definition="Invalid policy.",
+            data_type="text",
+            extraction_instructions="Extract value.",
+            candidate_comparison="exact",
+        )
+
+    with pytest.raises(ValidationError, match="list data_type"):
+        FactDefinition(
+            id="invalid-list-policy",
+            name="Invalid list policy",
+            definition="Invalid list policy.",
+            data_type="text",
+            extraction_instructions="Extract value.",
+            candidate_comparison="allowed_alternatives",
+            qualification_weight=1,
+        )
+
+
 def test_dimension_rejects_negative_weight() -> None:
     with pytest.raises(ValidationError):
         ValueDimension(

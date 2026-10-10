@@ -274,6 +274,22 @@ def test_patch_rejects_non_finite_weights(weight: float) -> None:
         apply_rubric_patch(rubric, patch)
 
 
+@pytest.mark.parametrize("weight", [float("inf"), float("nan")])
+def test_patch_rejects_non_finite_qualification_weights(weight: float) -> None:
+    rubric = load_default_rubric()
+    patch = RubricPatch(
+        fact_updates={
+            "role_family": {
+                "candidate_comparison": "exact",
+                "qualification_weight": weight,
+            }
+        }
+    )
+
+    with pytest.raises(ValueError, match="qualification_weight"):
+        apply_rubric_patch(rubric, patch)
+
+
 def test_patch_rejects_inverted_recommendation_thresholds() -> None:
     rubric = load_default_rubric()
     patch = RubricPatch(
@@ -285,6 +301,18 @@ def test_patch_rejects_inverted_recommendation_thresholds() -> None:
 
     with pytest.raises(ValueError, match="priority_apply > apply_after_review"):
         apply_rubric_patch(rubric, patch)
+
+
+def test_skip_threshold_must_cover_zero() -> None:
+    rubric = load_default_rubric()
+
+    with pytest.raises(ValueError, match="skip threshold must be zero"):
+        apply_rubric_patch(
+            rubric,
+            RubricPatch(
+                threshold_updates={RecommendationLevel.SKIP: 0.1}
+            ),
+        )
 
 
 def test_rubric_requires_all_recommendation_thresholds() -> None:
@@ -312,6 +340,12 @@ def test_default_neutral_candidate_comparisons_use_lists() -> None:
 
     assert facts["work_arrangement_terms"].data_type == "list"
     assert facts["work_authorization_requirement"].data_type == "list"
+    assert facts["work_arrangement_terms"].candidate_comparison == "none"
+    assert (
+        facts["work_authorization_requirement"].candidate_comparison
+        == "allowed_alternatives"
+    )
+    assert facts["work_authorization_requirement"].qualification_weight == 1
     assert dimensions["work_authorization"].positive_keywords == []
     assert dimensions["work_authorization"].negative_keywords == []
 
