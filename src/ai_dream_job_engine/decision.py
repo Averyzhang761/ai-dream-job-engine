@@ -267,6 +267,20 @@ def _qualification(
         if not fact.ready:
             gaps.append(_missing_gap(definition.id, [definition.id], fact.evidence, fact.missing_evidence))
             continue
+        if (
+            definition.candidate_comparison == "allowed_alternatives"
+            and not fact.value
+        ):
+            contributions.append(
+                DecisionContribution(
+                    subject_id=definition.id,
+                    score=1,
+                    weight=definition.qualification_weight,
+                    input_ids=[fact.id],
+                    job_evidence=list(fact.evidence),
+                )
+            )
+            continue
         claims = inputs.claims.get(definition.id, ())
         conflicts = [
             item

@@ -315,6 +315,23 @@ def test_skip_threshold_must_cover_zero() -> None:
         )
 
 
+def test_hard_constraint_requires_active_candidate_comparison() -> None:
+    rubric = load_default_rubric()
+
+    with pytest.raises(ValueError, match="hard_constraint.*candidate_comparison"):
+        apply_rubric_patch(
+            rubric,
+            RubricPatch(
+                fact_updates={
+                    "work_authorization_requirement": {
+                        "candidate_comparison": "none",
+                        "qualification_weight": 0,
+                    }
+                }
+            ),
+        )
+
+
 def test_rubric_requires_all_recommendation_thresholds() -> None:
     rubric = load_default_rubric()
     del rubric.recommendation_thresholds[RecommendationLevel.HOLD]

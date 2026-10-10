@@ -548,6 +548,14 @@ def test_zero_weight_fact_without_qualification_policy_is_disabled() -> None:
     )
 
 
+def test_decision_rejects_hard_constraint_without_candidate_comparison() -> None:
+    rubric = _rubric()
+    rubric.facts[2] = _with_candidate_policy(rubric.facts[2], "none", 0)
+
+    with pytest.raises(ValueError, match="hard_constraint.*candidate_comparison"):
+        decide_job(_facts(), _signals(), CandidateProfile(claims=_strong_claims()), rubric)
+
+
 def test_explicit_qualification_survives_zero_weight_dimension() -> None:
     rubric = _rubric()
     rubric.dimensions[1] = rubric.dimensions[1].model_copy(update={"weight": 0})
@@ -684,12 +692,6 @@ def test_empty_default_authorization_list_is_unrestricted() -> None:
         [],
         "JD states no authorization restriction",
     )
-    claim = _claim(
-        "claim-auth",
-        "work_authorization_requirement",
-        ["requires sponsorship"],
-        ClaimSource.USER_CONFIRMED,
-    )
     other_facts = [
         ExtractedFact(fact_id=item.id, is_unknown=True, evidence=["not needed here"])
         for item in rubric.facts
@@ -699,11 +701,22 @@ def test_empty_default_authorization_list_is_unrestricted() -> None:
     result = decide_job(
         [fact, *other_facts],
         [],
-        CandidateProfile(claims=[claim]),
+        CandidateProfile(),
         rubric,
     )
 
-    assert all(gap.kind is not GapKind.HARD_BLOCKER for gap in result.gaps)
+    authorization = next(
+        item
+        for item in result.qualification_contributions
+        if item.subject_id == "work_authorization_requirement"
+    )
+    assert authorization.score == 1
+    assert authorization.input_ids == ["work_authorization_requirement"]
+    assert authorization.job_evidence == ["JD states no authorization restriction"]
+    assert authorization.candidate_evidence == []
+    assert all(
+        gap.subject_id != "work_authorization_requirement" for gap in result.gaps
+    )
 
 
 def test_nonempty_allowed_authorization_requires_candidate_overlap() -> None:

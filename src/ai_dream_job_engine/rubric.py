@@ -85,7 +85,8 @@ def _validate_rubric(rubric: Rubric) -> None:
     _require_unique_ids("dimension", rubric.dimensions)
     _require_unique_ids("question", rubric.questions)
 
-    fact_ids = {fact.id for fact in rubric.facts}
+    facts_by_id = {fact.id: fact for fact in rubric.facts}
+    fact_ids = set(facts_by_id)
     signal_ids = {question.id for question in rubric.questions}
     for fact in rubric.facts:
         _validate_fact_default(fact)
@@ -106,6 +107,14 @@ def _validate_rubric(rubric: Rubric) -> None:
                 raise ValueError(
                     f"unknown signal reference {signal_id!r} in dimension {dimension.id!r}"
                 )
+        if dimension.hard_constraint and not any(
+            facts_by_id[fact_id].candidate_comparison != "none"
+            for fact_id in dimension.fact_ids
+        ):
+            raise ValueError(
+                f"hard_constraint dimension {dimension.id!r} must reference a fact "
+                "with active candidate_comparison"
+            )
 
     expected_levels = set(RecommendationLevel)
     if set(rubric.recommendation_thresholds) != expected_levels:
