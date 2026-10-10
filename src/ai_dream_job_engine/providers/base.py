@@ -11,6 +11,10 @@ from ai_dream_job_engine.models import (
 )
 
 
+class ProviderError(RuntimeError):
+    """A provider failed without exposing request data or credentials."""
+
+
 class JobFactExtractor(Protocol):
     def extract(
         self, job_description: str, rubric: Rubric

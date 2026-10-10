@@ -184,6 +184,31 @@ class Rubric(DomainModel):
     )
 
 
+class EvidenceChunk(DomainModel):
+    id: str = Field(min_length=1)
+    text: str
+    start_offset: int = Field(ge=0)
+    end_offset: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def offsets_match_text(self) -> EvidenceChunk:
+        if self.end_offset - self.start_offset != len(self.text):
+            raise ValueError("evidence chunk offsets must match its text")
+        return self
+
+
+class EvidenceDocument(DomainModel):
+    text: str
+    chunks: list[EvidenceChunk]
+
+
+class EvidenceRef(DomainModel):
+    chunk_id: str = Field(min_length=1)
+    quote: str = Field(min_length=1)
+    start_offset: int = Field(ge=0)
+    end_offset: int = Field(ge=0)
+
+
 class ExtractedFact(DomainModel):
     fact_id: str = Field(min_length=1)
     value: Any | None = None
