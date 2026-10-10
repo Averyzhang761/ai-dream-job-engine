@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.cache/
 .venv/
 venv/
 *.egg-info/
@@ -13,7 +14,10 @@ build/
 !.env.example
 !.env.sample
 *.db
+*.sqlite
 *.sqlite3
+*.sqlite-wal
+*.sqlite-shm
 *.sqlite3-wal
 *.sqlite3-shm
 *.db-wal
@@ -23,9 +27,14 @@ build/
 # Private local inputs and generated evaluation outputs.
 eval/private/
 eval/reports/
+private-data/**
 private-data/**/*.pdf
 private-data/**/*.doc
 private-data/**/*.docx
+private-data/**/*.odt
+private-data/**/*.pages
+private-data/**/*.xls
+private-data/**/*.xlsx
 private-data/**/*.rtf
 private-data/**/*.txt
 local-mcp-data/

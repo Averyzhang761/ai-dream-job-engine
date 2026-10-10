@@ -35,6 +35,12 @@ Start the local MCP server with:
 ./scripts/start-mcp.sh
 ```
 
+The helper script requires [`uv`](https://docs.astral.sh/uv/). A clean environment can instead use the installed Python module directly, without `uv`:
+
+```bash
+python -m ai_dream_job_engine.mcp_server
+```
+
 ## Model configuration
 
 Model credentials stay in environment variables and must not be committed. Set `AI_DREAM_JOB_FACT_PROVIDER` to `openai` or `openrouter`, set `AI_DREAM_JOB_FACT_MODEL`, and provide the corresponding `OPENAI_API_KEY` or `OPENROUTER_API_KEY`. OpenRouter uses its fixed API base. JEV decision signals use `TYPESAFE_API_KEY` and the adapter's pinned JEV endpoint/model. Provider adapters are not created when the evaluation module is imported.
@@ -67,17 +73,19 @@ The engine distinguishes public job evidence, user-confirmed candidate claims, a
 
 Data classes are `public_job_data`, `selected_candidate_claims`, and `restricted_personal_data`. Outbound disclosures identify provider, purpose, fields, data class, and confirmation state. Public JD text is the only default external-model payload. Restricted personal data is not sent by the implemented provider flow.
 
-Local profiles, rubrics, and analysis records live in the configured local SQLite database. Private evaluation cases belong under `eval/private/`, generated private reports under `eval/reports/`, and local MCP state under `local-mcp-data/`; these paths are ignored by Git. There is no telemetry.
+Local profiles, rubrics, and analysis records default to `.data/ai-dream-job-engine.sqlite3` in the project root. Set `AI_DREAM_JOB_DATA_PATH` to override that location. Private evaluation cases belong under `eval/private/`, generated private reports under `eval/reports/`, and local MCP state under `local-mcp-data/`; these paths are ignored by Git. There is no telemetry.
 
 ## Evaluation method
 
-The harness requires human recommendation and gap labels before the first system run, rejects pre-populated system results, and does not mutate source cases. It reports recommendation **agreement**, blocker precision with `null` when no blocker was predicted, paired gap-label confusion counts, unsupported-claim count, rerun stability, top-five gap-label agreement, and elapsed review-run time.
+The protocol has two phases. Before analysis, the human records recommendation and gap labels; the harness rejects pre-populated system results and does not mutate source cases. After analysis, a human may explicitly add `human_top_five_usefulness` and `human_review_time_seconds` while reviewing the output.
+
+Automated fields are recommendation **agreement**, blocker precision with `null` when no blocker was predicted, lossless gap-label counts with missing-side sentinels, unsupported-claim count, rerun stability, `top_five_gap_label_agreement`, and `evaluation_runtime_seconds`. The report retains every attempted case in input order and marks partial runs with counts and `run_complete=false`. `top_five_usefulness` and `review_time_seconds` remain `null` unless every completed case contains the corresponding explicit human post-review value. A partial report is written atomically, but the CLI exits nonzero.
 
 These are descriptive review signals, not statistical accuracy estimates. The committed cases are synthetic and only exercise the offline path. See [eval/README.md](eval/README.md) for the private 20-JD protocol. That real evaluation has not been completed and no real JD dataset is included.
 
 ## Limitations
 
-The current implementation analyzes user-supplied job text with a local core and Agent-native plugin. Model outputs can be incomplete or wrong, evidence references still require human review, and the synthetic fixture cannot establish real-world usefulness. Evaluation timing is local run time, not a controlled usability study.
+The current implementation analyzes user-supplied job text with a local core and Agent-native plugin. Model outputs can be incomplete or wrong, evidence references still require human review, and the synthetic fixture cannot establish real-world usefulness. Evaluation runtime is machine execution time; review time is accepted only from explicit human post-review input. Neither is a controlled usability study.
 
 Not implemented: job search, Gmail sync, application generation or auto-apply, application submission, cloud accounts, paid tiers, telemetry, a hosted service, or website, desktop, browser, or MCP App UI.
 

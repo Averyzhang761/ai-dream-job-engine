@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,6 +12,7 @@ from ai_dream_job_engine.models import (
     GapKind,
     RecommendationLevel,
 )
+import scripts.run_evaluation as evaluation_module
 from scripts.run_evaluation import main, run_evaluation
 
 
@@ -52,13 +54,21 @@ def _record(
 
 
 class SequenceService:
-    def __init__(self, records: list[SimpleNamespace]) -> None:
+    def __init__(self, records: list[SimpleNamespace | BaseException]) -> None:
         self.records = iter(records)
         self.seen: list[str] = []
 
     def analyze_job(self, job_description: str) -> SimpleNamespace:
         self.seen.append(job_description)
-        return next(self.records)
+        outcome = next(self.records)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+class FailingService:
+    def analyze_job(self, job_description: str) -> SimpleNamespace:
+        raise RuntimeError("PRIVATE-JD-MARKER secret@example.test")
 
 
 def test_case_requires_human_judgment_before_system_result() -> None:
@@ -118,7 +128,8 @@ def test_report_counts_gap_classification() -> None:
 
     assert report.blocker_precision == 0.5
     assert report.gap_type_confusion_counts[GapKind.HARD_BLOCKER][GapKind.HARD_BLOCKER] == 1
-    assert report.gap_type_confusion_counts[GapKind.CAPABILITY_GAP][GapKind.HARD_BLOCKER] == 1
+    assert report.gap_type_confusion_counts[GapKind.CAPABILITY_GAP]["__missing_system__"] == 1
+    assert report.gap_type_confusion_counts["__missing_human__"][GapKind.HARD_BLOCKER] == 1
 
     no_predicted_blockers = run_evaluation(
         [_case(human_gap_labels=[GapKind.HARD_BLOCKER])],
@@ -132,11 +143,91 @@ def test_report_counts_gap_classification() -> None:
     assert no_predicted_blockers.blocker_precision is None
 
 
+def test_partial_report_retains_all_cases_and_nullable_zero_denominators() -> None:
+    cases = [_case(id="first"), _case(id="second")]
+    success = _record(
+        RecommendationLevel.APPLY_AFTER_REVIEW, [GapKind.EVIDENCE_GAP]
+    )
+    service = SequenceService([success, RuntimeError("private failure"), success])
+
+    report = run_evaluation(cases, service)
+
+    assert [case.id for case in report.cases] == ["first", "second"]
+    assert report.cases[1].human_gap_labels == [GapKind.EVIDENCE_GAP]
+    assert report.cases[1].system_recommendation is None
+    assert report.cases[1].system_gap_labels is None
+    assert report.attempted_count == 2
+    assert report.completed_count == 1
+    assert report.failed_count == 1
+    assert report.run_complete is False
+
+    failed = run_evaluation([_case()], FailingService())
+    assert failed.recommendation_agreement is None
+    assert failed.rerun_stability is None
+
+
+def test_confusion_matrix_counts_all_labels_with_missing_sentinels() -> None:
+    first = _record(
+        RecommendationLevel.APPLY_AFTER_REVIEW,
+        [GapKind.HARD_BLOCKER, GapKind.CAPABILITY_GAP, GapKind.PREFERENCE_MISMATCH],
+    )
+    report = run_evaluation(
+        [
+            _case(
+                human_gap_labels=[GapKind.EVIDENCE_GAP, GapKind.HARD_BLOCKER],
+            )
+        ],
+        SequenceService([first, first]),
+    )
+
+    confusion = report.gap_type_confusion_counts
+    assert confusion[GapKind.HARD_BLOCKER][GapKind.HARD_BLOCKER] == 1
+    assert confusion[GapKind.EVIDENCE_GAP]["__missing_system__"] == 1
+    assert confusion["__missing_human__"][GapKind.CAPABILITY_GAP] == 1
+    assert confusion["__missing_human__"][GapKind.PREFERENCE_MISMATCH] == 1
+    assert sum(sum(row.values()) for row in confusion.values()) == 4
+
+
+def test_human_review_metrics_are_optional_and_never_inferred() -> None:
+    record = _record(
+        RecommendationLevel.APPLY_AFTER_REVIEW, [GapKind.EVIDENCE_GAP]
+    )
+    unreviewed = run_evaluation([_case()], SequenceService([record, record]))
+
+    assert unreviewed.top_five_gap_label_agreement == 1.0
+    assert unreviewed.evaluation_runtime_seconds >= 0
+    assert unreviewed.top_five_usefulness is None
+    assert unreviewed.review_time_seconds is None
+
+    reviewed_cases = [
+        _case(
+            id="one",
+            human_top_five_usefulness=0.5,
+            human_review_time_seconds=30,
+        ),
+        _case(
+            id="two",
+            human_top_five_usefulness=1.0,
+            human_review_time_seconds=45,
+        ),
+    ]
+    reviewed = run_evaluation(
+        reviewed_cases, SequenceService([record, record, record, record])
+    )
+    assert reviewed.top_five_usefulness == 0.75
+    assert reviewed.review_time_seconds == 75
+
+
 def test_real_eval_paths_are_gitignored() -> None:
     gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
 
     assert "eval/private/" in gitignore
     assert "eval/reports/" in gitignore
+    assert "*.sqlite" in gitignore
+    assert "*.sqlite-wal" in gitignore
+    assert "*.sqlite-shm" in gitignore
+    assert ".cache/" in gitignore
+    assert "private-data/**" in gitignore
     assert not any(
         SYNTHETIC_FIXTURE.match(pattern)
         for pattern in ("eval/", "eval/*.jsonl", "eval/synthetic_cases.jsonl")
@@ -170,3 +261,99 @@ def test_cli_writes_only_report_and_redacts_invalid_input(
     assert raw_jd not in captured.err + captured.out
     assert source.read_text().endswith("\n")
     assert not report_path.exists()
+
+
+def test_cli_writes_partial_report_atomically_and_exits_nonzero(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "cases.jsonl"
+    destination = tmp_path / "report.json"
+    cases = [_case(id="success"), _case(id="failure")]
+    source.write_text(
+        "\n".join(case.model_dump_json() for case in cases) + "\n",
+        encoding="utf-8",
+    )
+    success = _record(
+        RecommendationLevel.APPLY_AFTER_REVIEW, [GapKind.EVIDENCE_GAP]
+    )
+    service = SequenceService([success, RuntimeError("PRIVATE-JD-MARKER"), success])
+
+    exit_code = main([str(source), str(destination)], service=service)
+    payload = json.loads(destination.read_text(encoding="utf-8"))
+    captured = capsys.readouterr()
+
+    assert exit_code != 0
+    assert payload["run_complete"] is False
+    assert payload["attempted_count"] == 2
+    assert payload["completed_count"] == 1
+    assert payload["failed_count"] == 1
+    assert len(payload["cases"]) == 2
+    assert "PRIVATE-JD-MARKER" not in captured.out + captured.err
+    assert not list(tmp_path.glob(".report.json.*.tmp"))
+
+
+@pytest.mark.parametrize("link_kind", ["hardlink", "symlink"])
+def test_cli_rejects_existing_destination_with_same_inode(
+    tmp_path: Path, link_kind: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "cases.jsonl"
+    destination = tmp_path / "report.json"
+    original = _case().model_dump_json() + "\n"
+    source.write_text(original, encoding="utf-8")
+    if link_kind == "hardlink":
+        os.link(source, destination)
+    else:
+        destination.symlink_to(source)
+
+    exit_code = main([str(source), str(destination)], service=FailingService())
+
+    assert exit_code != 0
+    assert source.read_text(encoding="utf-8") == original
+    assert "PRIVATE-JD-MARKER" not in capsys.readouterr().err
+
+
+def test_atomic_write_preserves_destination_and_cleans_temp_on_replace_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "report.json"
+    destination.write_text("old report\n", encoding="utf-8")
+
+    def fail_replace(source: Path, target: Path) -> None:
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(evaluation_module.os, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        evaluation_module._write_report_atomic(destination, "new report\n")
+
+    assert destination.read_text(encoding="utf-8") == "old report\n"
+    assert not list(tmp_path.glob(".report.json.*.tmp"))
+
+
+def test_duplicate_ids_report_both_line_numbers_without_private_content(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "cases.jsonl"
+    destination = tmp_path / "report.json"
+    private_id = "PRIVATE-ID-MARKER"
+    private_jd = "PRIVATE-JD-MARKER"
+    case = _case(id=private_id, job_description=private_jd)
+    source.write_text(case.model_dump_json() + "\n" + case.model_dump_json() + "\n")
+
+    exit_code = main([str(source), str(destination)], service=FailingService())
+    captured = capsys.readouterr()
+
+    assert exit_code != 0
+    assert "line 2" in captured.err
+    assert "first line 1" in captured.err
+    assert private_id not in captured.err
+    assert private_jd not in captured.err
+    assert not destination.exists()
+
+
+def test_readme_documents_clean_startup_and_local_database_path() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "python -m ai_dream_job_engine.mcp_server" in readme
+    assert ".data/ai-dream-job-engine.sqlite3" in readme
+    assert "AI_DREAM_JOB_DATA_PATH" in readme

@@ -405,18 +405,36 @@ class EvaluationCase(DomainModel):
     human_gap_labels: list[GapKind]
     system_recommendation: RecommendationLevel | None = None
     system_gap_labels: list[GapKind] | None = None
+    human_top_five_usefulness: float | None = Field(default=None, ge=0, le=1)
+    human_review_time_seconds: float | None = Field(default=None, ge=0)
     notes: str | None = None
 
 
 class EvaluationReport(DomainModel):
     cases: list[EvaluationCase] = Field(default_factory=list)
-    recommendation_agreement: float = Field(ge=0, le=1)
+    attempted_count: int = Field(ge=0)
+    completed_count: int = Field(ge=0)
+    failed_count: int = Field(ge=0)
+    run_complete: bool
+    recommendation_agreement: float | None = Field(default=None, ge=0, le=1)
     blocker_precision: float | None = Field(ge=0, le=1)
     gap_type_confusion_counts: dict[
-        GapKind, dict[GapKind, Annotated[int, Field(ge=0)]]
+        str, dict[str, Annotated[int, Field(ge=0)]]
     ]
     unsupported_claim_count: int = Field(ge=0)
-    rerun_stability: float = Field(ge=0, le=1)
-    top_five_usefulness: float = Field(ge=0, le=1)
-    review_time_seconds: float = Field(ge=0)
+    rerun_stability: float | None = Field(default=None, ge=0, le=1)
+    top_five_gap_label_agreement: float | None = Field(default=None, ge=0, le=1)
+    evaluation_runtime_seconds: float = Field(ge=0)
+    top_five_usefulness: float | None = Field(default=None, ge=0, le=1)
+    review_time_seconds: float | None = Field(default=None, ge=0)
     failure_case_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def run_counts_are_consistent(self) -> EvaluationReport:
+        if self.attempted_count != len(self.cases):
+            raise ValueError("attempted count must match report cases")
+        if self.completed_count + self.failed_count != self.attempted_count:
+            raise ValueError("completed and failed counts must match attempted count")
+        if self.run_complete != (self.failed_count == 0):
+            raise ValueError("run_complete must reflect failed count")
+        return self

@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import tempfile
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -48,7 +50,8 @@ def run_evaluation(
 
     source_snapshots = [case.model_dump(mode="json") for case in cases]
     started = time.monotonic()
-    evaluated: list[EvaluationCase] = []
+    reported: list[EvaluationCase] = []
+    completed_cases: list[EvaluationCase] = []
     first_results: dict[str, tuple[RecommendationLevel, list[GapKind]]] = {}
     failure_ids: list[str] = []
     unsupported_claim_count = 0
@@ -59,18 +62,19 @@ def run_evaluation(
             recommendation, gaps = _result_values(record)
         except Exception:
             failure_ids.append(case.id)
+            reported.append(case.model_copy(deep=True))
             continue
         first_results[case.id] = (recommendation, gaps)
         unsupported_claim_count += _unsupported_claims(record)
-        evaluated.append(
-            case.model_copy(
-                update={
-                    "system_recommendation": recommendation,
-                    "system_gap_labels": gaps,
-                },
-                deep=True,
-            )
+        evaluated_case = case.model_copy(
+            update={
+                "system_recommendation": recommendation,
+                "system_gap_labels": gaps,
+            },
+            deep=True,
         )
+        completed_cases.append(evaluated_case)
+        reported.append(evaluated_case)
 
     if [case.model_dump(mode="json") for case in cases] != source_snapshots:
         raise ValueError("source evaluation case changed during analysis")
@@ -89,37 +93,47 @@ def run_evaluation(
         if second == first:
             stable += 1
 
-    completed = len(evaluated)
+    completed = len(completed_cases)
     recommendation_agreement = (
         sum(
             case.human_recommendation is case.system_recommendation
-            for case in evaluated
+            for case in completed_cases
         )
         / completed
         if completed
-        else 0.0
+        else None
     )
     predicted_blockers = sum(
         GapKind.HARD_BLOCKER in (case.system_gap_labels or [])
-        for case in evaluated
+        for case in completed_cases
     )
     true_blockers = sum(
         GapKind.HARD_BLOCKER in case.human_gap_labels
         and GapKind.HARD_BLOCKER in (case.system_gap_labels or [])
-        for case in evaluated
+        for case in completed_cases
     )
 
     return EvaluationReport(
-        cases=evaluated,
+        cases=reported,
+        attempted_count=len(cases),
+        completed_count=completed,
+        failed_count=len(failure_ids),
+        run_complete=not failure_ids,
         recommendation_agreement=recommendation_agreement,
         blocker_precision=(
             true_blockers / predicted_blockers if predicted_blockers else None
         ),
-        gap_type_confusion_counts=_gap_confusion(evaluated),
+        gap_type_confusion_counts=_gap_confusion(completed_cases),
         unsupported_claim_count=unsupported_claim_count,
-        rerun_stability=stable / rerun_count if rerun_count else 0.0,
-        top_five_usefulness=_top_five_label_agreement(evaluated),
-        review_time_seconds=time.monotonic() - started,
+        rerun_stability=stable / rerun_count if rerun_count else None,
+        top_five_gap_label_agreement=_top_five_label_agreement(completed_cases),
+        evaluation_runtime_seconds=time.monotonic() - started,
+        top_five_usefulness=_complete_human_average(
+            completed_cases, "human_top_five_usefulness"
+        ),
+        review_time_seconds=_complete_human_total(
+            completed_cases, "human_review_time_seconds"
+        ),
         failure_case_ids=failure_ids,
     )
 
@@ -147,26 +161,28 @@ def _unsupported_claims(record: object) -> int:
 
 def _gap_confusion(
     cases: list[EvaluationCase],
-) -> dict[GapKind, dict[GapKind, int]]:
-    counts: dict[GapKind, dict[GapKind, int]] = {}
+) -> dict[str, dict[str, int]]:
+    counts: dict[str, dict[str, int]] = {}
     for case in cases:
-        human_remaining = list(dict.fromkeys(case.human_gap_labels))
-        system_remaining = list(dict.fromkeys(case.system_gap_labels or []))
-        for label in list(human_remaining):
-            if label in system_remaining:
-                counts.setdefault(label, {}).setdefault(label, 0)
-                counts[label][label] += 1
-                human_remaining.remove(label)
-                system_remaining.remove(label)
-        for human, system in zip(human_remaining, system_remaining, strict=False):
-            counts.setdefault(human, {}).setdefault(system, 0)
-            counts[human][system] += 1
+        human_labels = set(case.human_gap_labels)
+        system_labels = set(case.system_gap_labels or [])
+        for label in sorted(human_labels & system_labels):
+            _increment(counts, label, label)
+        for label in sorted(human_labels - system_labels):
+            _increment(counts, label, "__missing_system__")
+        for label in sorted(system_labels - human_labels):
+            _increment(counts, "__missing_human__", label)
     return counts
 
 
-def _top_five_label_agreement(cases: list[EvaluationCase]) -> float:
+def _increment(counts: dict[str, dict[str, int]], row: str, column: str) -> None:
+    counts.setdefault(row, {}).setdefault(column, 0)
+    counts[row][column] += 1
+
+
+def _top_five_label_agreement(cases: list[EvaluationCase]) -> float | None:
     if not cases:
-        return 0.0
+        return None
     scores = []
     for case in cases:
         predicted = list(dict.fromkeys(case.system_gap_labels or []))[:5]
@@ -178,8 +194,25 @@ def _top_five_label_agreement(cases: list[EvaluationCase]) -> float:
     return sum(scores) / len(scores)
 
 
+def _complete_human_average(
+    cases: list[EvaluationCase], field: str
+) -> float | None:
+    values = [getattr(case, field) for case in cases]
+    if not values or any(value is None for value in values):
+        return None
+    return sum(values) / len(values)  # type: ignore[arg-type]
+
+
+def _complete_human_total(cases: list[EvaluationCase], field: str) -> float | None:
+    values = [getattr(case, field) for case in cases]
+    if not values or any(value is None for value in values):
+        return None
+    return sum(values)  # type: ignore[arg-type]
+
+
 def _load_cases(path: Path) -> list[EvaluationCase]:
     cases = []
+    first_lines: dict[str, int] = {}
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeError) as error:
@@ -188,12 +221,51 @@ def _load_cases(path: Path) -> list[EvaluationCase]:
         if not line.strip():
             raise EvaluationInputError(f"line {line_number}: blank line is invalid")
         try:
-            cases.append(EvaluationCase.model_validate_json(line))
+            case = EvaluationCase.model_validate_json(line)
         except (ValidationError, ValueError, json.JSONDecodeError):
             raise EvaluationInputError(
                 f"line {line_number}: invalid evaluation case"
             ) from None
+        if case.id in first_lines:
+            raise EvaluationInputError(
+                f"duplicate case ID: line {line_number}; "
+                f"first line {first_lines[case.id]}"
+            )
+        first_lines[case.id] = line_number
+        cases.append(case)
     return cases
+
+
+def _paths_share_input(source: Path, destination: Path) -> bool:
+    if destination.exists() or destination.is_symlink():
+        try:
+            return source.samefile(destination)
+        except OSError:
+            raise EvaluationInputError("report path could not be validated") from None
+    return source.resolve() == destination.resolve()
+
+
+def _write_report_atomic(destination: Path, content: str) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            temporary.write(content)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_path, destination)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 class OfflineSyntheticService:
@@ -243,7 +315,7 @@ def main(
 ) -> int:
     args = _parser().parse_args(argv)
     try:
-        if args.cases.resolve() == args.report.resolve():
+        if _paths_share_input(args.cases, args.report):
             raise EvaluationInputError("report path must differ from input path")
         cases = _load_cases(args.cases)
         active_service = service or (OfflineSyntheticService() if args.offline else None)
@@ -252,13 +324,16 @@ def main(
                 "no analysis service configured; use dependency injection or --offline"
             )
         report = run_evaluation(cases, active_service)  # type: ignore[arg-type]
-        args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(
-            report.model_dump_json(indent=2) + "\n", encoding="utf-8"
+        _write_report_atomic(
+            args.report,
+            report.model_dump_json(indent=2) + "\n",
         )
-    except (EvaluationInputError, ValueError):
+    except (EvaluationInputError, OSError, ValueError):
         print("Evaluation failed: " + _safe_error_message(sys.exc_info()[1]), file=sys.stderr)
         return 2
+    if not report.run_complete:
+        print(f"Partial evaluation report written: {args.report}", file=sys.stderr)
+        return 1
     print(f"Evaluation report written: {args.report}")
     return 0
 

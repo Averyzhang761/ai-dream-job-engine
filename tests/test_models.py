@@ -234,8 +234,14 @@ def test_evaluation_report_carries_all_named_metrics() -> None:
                 human_gap_labels=[GapKind.EVIDENCE_GAP],
                 system_recommendation=RecommendationLevel.APPLY_AFTER_REVIEW,
                 system_gap_labels=[GapKind.EVIDENCE_GAP],
+                human_top_five_usefulness=0.8,
+                human_review_time_seconds=120,
             )
         ],
+        attempted_count=1,
+        completed_count=1,
+        failed_count=0,
+        run_complete=True,
         recommendation_agreement=0.8,
         blocker_precision=1.0,
         gap_type_confusion_counts={
@@ -243,6 +249,8 @@ def test_evaluation_report_carries_all_named_metrics() -> None:
         },
         unsupported_claim_count=0,
         rerun_stability=1.0,
+        top_five_gap_label_agreement=1.0,
+        evaluation_runtime_seconds=2.5,
         top_five_usefulness=0.8,
         review_time_seconds=120,
     )
@@ -250,3 +258,5 @@ def test_evaluation_report_carries_all_named_metrics() -> None:
     assert report.recommendation_agreement == 0.8
     assert report.unsupported_claim_count == 0
     assert report.review_time_seconds == 120
+    assert report.run_complete is True
+    assert report.evaluation_runtime_seconds == 2.5
