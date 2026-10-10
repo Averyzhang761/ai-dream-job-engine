@@ -7,7 +7,7 @@ import math
 from typing import Any, Literal
 
 from openai import OpenAI
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
 
 from ai_dream_job_engine.evidence import build_evidence_chunks, validate_quote
 from ai_dream_job_engine.models import (
@@ -24,16 +24,16 @@ SCHEMA_VERSION = "extracted-fact-v1"
 
 
 class _ProviderFact(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
     fact_id: str = Field(min_length=1)
     value: Any | None = None
-    is_unknown: bool = False
+    is_unknown: StrictBool = False
     evidence: list[str] = Field(default_factory=list)
 
 
 class _ExtractionResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
     facts: list[_ProviderFact]
 
@@ -59,6 +59,7 @@ class OpenAICompatibleProvider:
         if client is not None:
             self.client = client
         else:
+            initialization_failed = False
             try:
                 if provider == "openrouter":
                     self.client = OpenAI(
@@ -67,11 +68,15 @@ class OpenAICompatibleProvider:
                         max_retries=0,
                     )
                 else:
-                    self.client = OpenAI(api_key=api_key, max_retries=0)
+                    self.client = OpenAI(
+                        api_key=api_key,
+                        base_url="https://api.openai.com/v1",
+                        max_retries=0,
+                    )
             except Exception:
-                raise ProviderError(
-                    "provider client initialization failed"
-                ) from None
+                initialization_failed = True
+            if initialization_failed:
+                raise ProviderError("provider client initialization failed")
 
     def __repr__(self) -> str:
         return (
@@ -96,6 +101,7 @@ class OpenAICompatibleProvider:
             "schema_version": SCHEMA_VERSION,
             "prompt_version": PROMPT_VERSION,
         }
+        request_failed = False
         try:
             response = self.client.responses.parse(
                 model=self.model,
@@ -108,23 +114,28 @@ class OpenAICompatibleProvider:
                 store=False,
             )
         except Exception:
-            raise ProviderError("job fact provider request failed") from None
+            request_failed = True
+        if request_failed:
+            raise ProviderError("job fact provider request failed")
         parsed = self._parse_response(response)
         return self._validated_facts(parsed, job_description, rubric)
 
     @staticmethod
     def _parse_response(response: Any) -> _ExtractionResponse:
+        parsing_failed = False
         try:
             raw = getattr(response, "output_parsed", None)
             if raw is None:
                 raw = getattr(response, "output_text", None)
             if isinstance(raw, str):
-                return _ExtractionResponse.model_validate_json(raw)
-            return _ExtractionResponse.model_validate(raw)
+                parsed = _ExtractionResponse.model_validate_json(raw)
+            else:
+                parsed = _ExtractionResponse.model_validate(raw)
         except Exception:
-            raise ProviderError(
-                "provider returned malformed structured output"
-            ) from None
+            parsing_failed = True
+        if parsing_failed:
+            raise ProviderError("provider returned malformed structured output")
+        return parsed
 
     def _validated_facts(
         self,
@@ -163,6 +174,7 @@ class OpenAICompatibleProvider:
                 and not returned.evidence
             ):
                 raise ProviderError("provider returned a fact without evidence")
+            evidence_failed = False
             try:
                 for quote in returned.evidence:
                     validate_quote(document, quote)
@@ -177,7 +189,9 @@ class OpenAICompatibleProvider:
                     )
                 )
             except (ValueError, ValidationError):
-                raise ProviderError("provider returned invalid evidence") from None
+                evidence_failed = True
+            if evidence_failed:
+                raise ProviderError("provider returned invalid evidence")
         return facts
 
     @staticmethod

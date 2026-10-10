@@ -74,6 +74,31 @@ class BrokenDecoderClient:
     responses = Responses()
 
 
+def raise_nested_secret_error() -> None:
+    try:
+        raise ValueError("INNER SECRET")
+    except ValueError as inner:
+        raise RuntimeError("OUTER SECRET") from inner
+
+
+class NestedErrorOpenAIClient:
+    class Responses:
+        def parse(self, **_: Any) -> Any:
+            raise_nested_secret_error()
+
+    responses = Responses()
+
+
+class NestedErrorHttpClient:
+    def post(self, *_: Any, **__: Any) -> Any:
+        raise_nested_secret_error()
+
+
+def assert_no_exception_chain(error: ProviderError) -> None:
+    assert error.__context__ is None
+    assert error.__cause__ is None
+
+
 def rubric() -> Rubric:
     return Rubric(
         version="rubric-v1",
@@ -113,7 +138,10 @@ def provider_with_output(output: Any) -> OpenAICompatibleProvider:
     )
 
 
-def test_openai_direct_uses_official_base_url() -> None:
+def test_openai_direct_uses_official_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://hostile.invalid/v1")
     provider = OpenAICompatibleProvider(
         provider="openai", api_key="test-key", model="test-model"
     )
@@ -191,6 +219,23 @@ def test_provider_returns_validated_job_facts() -> None:
     assert facts[0].evidence == ["Remote"]
     assert facts[0].provider == "openai"
     assert facts[0].model == "test-model"
+
+
+@pytest.mark.parametrize("is_unknown", ["false", "true", 0, 1])
+def test_job_fact_is_unknown_requires_strict_boolean(is_unknown: Any) -> None:
+    output = {
+        "facts": [
+            {
+                "fact_id": "location",
+                "value": "Remote",
+                "is_unknown": is_unknown,
+                "evidence": ["Remote"],
+            }
+        ]
+    }
+
+    with pytest.raises(ProviderError, match="malformed structured output"):
+        provider_with_output(output).extract("Remote", rubric())
 
 
 @pytest.mark.parametrize(
@@ -299,8 +344,9 @@ def test_quote_not_in_jd_is_rejected() -> None:
         client=client,
     )
 
-    with pytest.raises(ProviderError, match="evidence"):
+    with pytest.raises(ProviderError, match="evidence") as error:
         provider.extract("This role is Remote.", rubric())
+    assert_no_exception_chain(error.value)
 
 
 @pytest.mark.parametrize(
@@ -356,8 +402,9 @@ def test_malformed_structured_output_raises_provider_error() -> None:
         client=client,
     )
 
-    with pytest.raises(ProviderError, match="structured output"):
+    with pytest.raises(ProviderError, match="structured output") as error:
         provider.extract("This role is Remote.", rubric())
+    assert_no_exception_chain(error.value)
 
 
 def test_jev_payload_contains_only_jd_and_questions() -> None:
@@ -487,10 +534,11 @@ def test_jev_rejects_unbound_or_malformed_answers(answer: dict[str, Any]) -> Non
         return httpx.Response(200, json={"answers": [answer]})
 
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
-        with pytest.raises(ProviderError, match="invalid response"):
+        with pytest.raises(ProviderError, match="invalid response") as error:
             JevSignalProvider(api_key="test-key", client=client).judge(
                 "Public JD", questions()
             )
+    assert_no_exception_chain(error.value)
 
 
 def test_jev_rejects_duplicate_returned_answers() -> None:
@@ -523,6 +571,7 @@ def test_provider_client_exceptions_are_redacted() -> None:
         openai_provider.extract("JD SECRET", rubric())
     assert str(openai_error.value) == "job fact provider request failed"
     assert leaked not in repr(openai_error.value)
+    assert_no_exception_chain(openai_error.value)
 
     decoding_provider = OpenAICompatibleProvider(
         provider="openai",
@@ -534,6 +583,7 @@ def test_provider_client_exceptions_are_redacted() -> None:
         decoding_provider.extract("JD SECRET", rubric())
     assert str(decoding_error.value) == "provider returned malformed structured output"
     assert leaked not in repr(decoding_error.value)
+    assert_no_exception_chain(decoding_error.value)
 
     with pytest.raises(ProviderError) as jev_error:
         JevSignalProvider(
@@ -542,6 +592,26 @@ def test_provider_client_exceptions_are_redacted() -> None:
         ).judge("JD SECRET", questions())
     assert str(jev_error.value) == "JEV provider request failed"
     assert leaked not in repr(jev_error.value)
+    assert_no_exception_chain(jev_error.value)
+
+
+def test_sanitized_provider_errors_have_no_exception_chain() -> None:
+    openai_provider = OpenAICompatibleProvider(
+        provider="openai",
+        api_key="test-key",
+        model="test-model",
+        client=NestedErrorOpenAIClient(),
+    )
+    with pytest.raises(ProviderError) as openai_error:
+        openai_provider.extract("JD SECRET", rubric())
+    assert_no_exception_chain(openai_error.value)
+
+    with pytest.raises(ProviderError) as jev_error:
+        JevSignalProvider(
+            api_key="SECRET_KEY",
+            client=NestedErrorHttpClient(),  # type: ignore[arg-type]
+        ).judge("JD SECRET", questions())
+    assert_no_exception_chain(jev_error.value)
 
 
 def test_provider_client_initialization_exceptions_are_redacted(
@@ -559,12 +629,14 @@ def test_provider_client_initialization_exceptions_are_redacted(
         )
     assert str(openai_error.value) == "provider client initialization failed"
     assert leaked not in repr(openai_error.value)
+    assert_no_exception_chain(openai_error.value)
 
     monkeypatch.setattr(jev_module.httpx, "Client", fail_client)
     with pytest.raises(ProviderError) as jev_error:
         JevSignalProvider(api_key=leaked)
     assert str(jev_error.value) == "JEV client initialization failed"
     assert leaked not in repr(jev_error.value)
+    assert_no_exception_chain(jev_error.value)
 
 
 @pytest.mark.parametrize(

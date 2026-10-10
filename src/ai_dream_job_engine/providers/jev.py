@@ -22,7 +22,7 @@ JEV_MODEL = "jev-latest"
 
 
 class _JevAnswer(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
     question_id: str = Field(min_length=1)
     question_version: str = Field(min_length=1)
@@ -30,7 +30,7 @@ class _JevAnswer(BaseModel):
 
 
 class _JevResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", strict=True)
 
     answers: list[_JevAnswer]
 
@@ -49,10 +49,13 @@ class JevSignalProvider:
         if client is not None:
             self._client = client
         else:
+            initialization_failed = False
             try:
                 self._client = httpx.Client()
             except Exception:
-                raise ProviderError("JEV client initialization failed") from None
+                initialization_failed = True
+            if initialization_failed:
+                raise ProviderError("JEV client initialization failed")
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(model={JEV_MODEL!r})"
@@ -72,6 +75,7 @@ class JevSignalProvider:
                 "questions": [question.model_dump() for question in questions],
             },
         }
+        request_failed = False
         try:
             response = self._client.post(
                 JEV_ENDPOINT,
@@ -81,12 +85,17 @@ class JevSignalProvider:
             response.raise_for_status()
             body = response.json()
         except Exception:
-            raise ProviderError("JEV provider request failed") from None
+            request_failed = True
+        if request_failed:
+            raise ProviderError("JEV provider request failed")
 
+        parsing_failed = False
         try:
             parsed = _JevResponse.model_validate(body)
         except (ValidationError, ValueError, TypeError):
-            raise ProviderError("JEV provider returned an invalid response") from None
+            parsing_failed = True
+        if parsing_failed:
+            raise ProviderError("JEV provider returned an invalid response")
 
         requested_keys = {
             (question.id, question.version) for question in questions
