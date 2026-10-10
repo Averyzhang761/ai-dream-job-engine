@@ -27,6 +27,10 @@ from ai_dream_job_engine.service import AnalysisServiceError, JobAnalysisService
 
 JOB_DESCRIPTION = "Senior Python Engineer at Acme. Remote role."
 NOW = datetime(2026, 10, 10, 12, tzinfo=timezone.utc)
+ANALYSIS_ID = "00000000-0000-4000-8000-000000000001"
+FAILURE_ID = "00000000-0000-4000-8000-000000000002"
+UNUSED_ID = "00000000-0000-4000-8000-000000000003"
+OTHER_ID = "00000000-0000-4000-8000-000000000004"
 
 
 class FakeFactExtractor:
@@ -154,7 +158,7 @@ def _service(
         store,
         facts,
         signals,
-        id_factory=id_factory or (lambda: "analysis-1"),
+        id_factory=id_factory or (lambda: ANALYSIS_ID),
         utc_clock=lambda: NOW,
         monotonic_clock=lambda: next(ticks),
     )
@@ -178,13 +182,14 @@ def test_analyze_job_runs_extract_signals_decide_and_persist(tmp_path) -> None:
     assert record.input_hash == "sha256:" + hashlib.sha256(
         JOB_DESCRIPTION.encode("utf-8")
     ).hexdigest()
+    assert record.input_length == len(JOB_DESCRIPTION)
     assert record.latency_ms == 25
     assert store.list_analyses() == [record]
     assert service.list_analyzed_jobs()[0].job_title == "Senior Python Engineer"
 
 
 def test_recompute_reuses_normalized_inputs_without_model_calls(tmp_path) -> None:
-    ids = iter(["analysis-1", "recompute-attempt-1"])
+    ids = iter([ANALYSIS_ID, UNUSED_ID])
     service, store, extractor, signal_provider = _service(
         tmp_path,
         profile=CandidateProfile(),
@@ -220,7 +225,7 @@ def test_recompute_reuses_normalized_inputs_without_model_calls(tmp_path) -> Non
 
 
 def test_recompute_uses_current_rubric_missing_and_stale_semantics(tmp_path) -> None:
-    ids = iter(["analysis-1", "unused-attempt"])
+    ids = iter([ANALYSIS_ID, UNUSED_ID])
     signal_provider = FakeSignalProvider(
         outputs=[
             DecisionSignal(
@@ -304,7 +309,7 @@ def test_recompute_uses_current_rubric_missing_and_stale_semantics(tmp_path) -> 
 
 
 def test_recompute_rejects_stored_input_trace_integrity_mismatch(tmp_path) -> None:
-    ids = iter(["analysis-1", "failure-attempt-1"])
+    ids = iter([ANALYSIS_ID, FAILURE_ID])
     service, store, _, _ = _service(
         tmp_path,
         profile=CandidateProfile(),
@@ -502,6 +507,10 @@ def test_success_projects_all_evidence_to_auditable_opaque_refs(tmp_path) -> Non
         "jd-evidence:v1:{job}:-1:1:{quote}",
         "jd-evidence:v1:{job}:zero:1:{quote}",
         "jd-evidence:v1:{job}:2:1:{quote}",
+        "jd-evidence:v1:{job}:0:0:{quote}",
+        "jd-evidence:v1:{job}:00:1:{quote}",
+        "jd-evidence:v1:{job}:0:01:{quote}",
+        "jd-evidence:v1:{job}:{input_length}:{past_end}:{quote}",
         "jd-evidence:v1:{job}:0:1:{short_quote}",
         "jd-evidence:v1:{job}:0:1:{upper_quote}",
         "jd-evidence:v1:{job}:0:1:{quote}:trailing",
@@ -512,7 +521,7 @@ def test_recompute_rejects_malformed_or_payload_bearing_jd_refs(
     tmp_path,
     malformed_ref,
 ) -> None:
-    ids = iter(["analysis-1", "failure-attempt-1"])
+    ids = iter([ANALYSIS_ID, FAILURE_ID])
     service, store, _, _ = _service(
         tmp_path,
         profile=CandidateProfile(),
@@ -527,6 +536,8 @@ def test_recompute_rejects_malformed_or_payload_bearing_jd_refs(
         short_job=job_digest[:-1],
         upper_job=job_digest.upper(),
         other_job="0" * 64,
+        input_length=len(JOB_DESCRIPTION),
+        past_end=len(JOB_DESCRIPTION) + 1,
         quote=quote_digest,
         short_quote=quote_digest[:-1],
         upper_quote=quote_digest.upper(),
@@ -545,6 +556,77 @@ def test_recompute_rejects_malformed_or_payload_bearing_jd_refs(
 
     assert exc_info.value.code == "analysis_failed"
     assert [item.status for item in store.list_analyses()] == ["success", "failed"]
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "trace_id_mismatch",
+        "unsafe_ids",
+        "outbound_class",
+        "input_length",
+        "jd_ref",
+        "profile_ref",
+    ],
+)
+def test_trace_read_rejects_malformed_stored_privacy_or_integrity_data(
+    tmp_path,
+    corruption,
+) -> None:
+    service, store, _, _ = _service(
+        tmp_path,
+        profile=CandidateProfile(),
+        rubric=_rubric(),
+    )
+    original = service.analyze_job(JOB_DESCRIPTION)
+    trace = original.trace
+    target_id = original.id
+    input_length = original.input_length
+    if corruption == "trace_id_mismatch":
+        trace = trace.model_copy(update={"analysis_id": OTHER_ID})
+    elif corruption == "unsafe_ids":
+        target_id = "private resume secret@example.com"
+        trace = trace.model_copy(update={"analysis_id": target_id})
+    elif corruption == "outbound_class":
+        trace = trace.model_copy(
+            update={"outbound_data_classes": [DataClass.RESTRICTED_PERSONAL_DATA]}
+        )
+    elif corruption == "input_length":
+        input_length = 1
+    elif corruption == "jd_ref":
+        trace = trace.model_copy(
+            update={
+                "evidence": [
+                    "jd-evidence:v1:"
+                    + original.input_hash.removeprefix("sha256:")
+                    + f":0:{len(JOB_DESCRIPTION)}:{JOB_DESCRIPTION}"
+                ]
+            }
+        )
+    else:
+        trace = trace.model_copy(
+            update={"evidence": ["profile-ref:v1:private@example.com"]}
+        )
+    poisoned = original.model_copy(
+        update={
+            "id": target_id,
+            "input_length": input_length,
+            "trace": trace,
+        }
+    )
+    store.save_analysis(poisoned)
+
+    with pytest.raises(AnalysisServiceError) as exc_info:
+        service.get_decision_trace(target_id)
+
+    assert exc_info.value.code == "trace_integrity_failed"
+    assert str(exc_info.value) == (
+        "Stored decision trace failed privacy and integrity validation."
+    )
+    assert "private" not in str(exc_info.value)
+    assert JOB_DESCRIPTION not in str(exc_info.value)
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
 
 
 def test_full_raw_jd_value_is_rejected_without_persistence(tmp_path) -> None:
@@ -567,7 +649,7 @@ def test_full_raw_jd_value_is_rejected_without_persistence(tmp_path) -> None:
 
 
 def test_failed_recompute_appends_attempt_and_preserves_success(tmp_path) -> None:
-    ids = iter(["analysis-1", "recompute-failure-1"])
+    ids = iter([ANALYSIS_ID, FAILURE_ID])
     service, store, extractor, signal_provider = _service(
         tmp_path,
         profile=CandidateProfile(),
@@ -595,7 +677,7 @@ def test_failed_recompute_appends_attempt_and_preserves_success(tmp_path) -> Non
 
     records = store.list_analyses()
     assert records[0] == original
-    assert records[1].id == "recompute-failure-1"
+    assert records[1].id == FAILURE_ID
     assert records[1].status == "failed"
     assert records[1].source_analysis_id == original.id
     assert len(extractor.calls) == 1
@@ -628,8 +710,8 @@ def test_successful_recompute_does_not_allocate_unused_failure_id(tmp_path) -> N
     generated_ids = []
 
     def same_id() -> str:
-        generated_ids.append("analysis-1")
-        return "analysis-1"
+        generated_ids.append(ANALYSIS_ID)
+        return ANALYSIS_ID
 
     service, store, _, _ = _service(
         tmp_path,
@@ -642,7 +724,7 @@ def test_successful_recompute_does_not_allocate_unused_failure_id(tmp_path) -> N
     recomputed = service.recompute_decision(original.id)
 
     assert recomputed.id == original.id
-    assert generated_ids == ["analysis-1"]
+    assert generated_ids == [ANALYSIS_ID]
     assert store.list_analyses() == [recomputed]
 
 
@@ -651,7 +733,7 @@ def test_failed_recompute_id_collision_reports_missing_audit_record(tmp_path) ->
         tmp_path,
         profile=CandidateProfile(),
         rubric=_rubric(),
-        id_factory=lambda: "analysis-1",
+        id_factory=lambda: ANALYSIS_ID,
     )
     original = service.analyze_job(JOB_DESCRIPTION)
     store.save_profile(
@@ -926,7 +1008,7 @@ def test_failed_recompute_storage_failure_keeps_prior_success(
     tmp_path,
     monkeypatch,
 ) -> None:
-    ids = iter(["analysis-1", "recompute-failure-1"])
+    ids = iter([ANALYSIS_ID, FAILURE_ID])
     service, store, _, _ = _service(
         tmp_path,
         profile=CandidateProfile(),

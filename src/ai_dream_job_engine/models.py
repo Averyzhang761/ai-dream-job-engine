@@ -371,6 +371,7 @@ class AnalysisRecord(DomainModel):
     id: str = Field(min_length=1)
     source_analysis_id: str | None = None
     input_hash: str = Field(min_length=1)
+    input_length: int | None = Field(default=None, ge=0)
     facts: list[ExtractedFact] = Field(default_factory=list)
     signals: list[DecisionSignal] = Field(default_factory=list)
     result: DecisionResult | None = None

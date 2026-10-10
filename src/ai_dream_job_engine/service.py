@@ -40,8 +40,17 @@ _ID_CATEGORY = "analysis_id_collision"
 _ID_MESSAGE = "A unique analysis ID could not be allocated safely."
 _AUDIT_CATEGORY = "failure_audit_persistence_failed"
 _AUDIT_MESSAGE = "Analysis failed, and its audit record could not be persisted safely."
+_TRACE_CATEGORY = "trace_integrity_failed"
+_TRACE_MESSAGE = "Stored decision trace failed privacy and integrity validation."
+_CANONICAL_UINT = r"(?:0|[1-9][0-9]*)"
 _JD_REF_PATTERN = re.compile(
-    r"jd-evidence:v1:([0-9a-f]{64}):([0-9]+):([0-9]+):([0-9a-f]{64})\Z"
+    rf"jd-evidence:v1:([0-9a-f]{{64}}):({_CANONICAL_UINT}):"
+    rf"({_CANONICAL_UINT}):([0-9a-f]{{64}})\Z"
+)
+_PROFILE_REF_PATTERN = re.compile(r"profile-ref:v1:[0-9a-f]{64}\Z")
+_INPUT_HASH_PATTERN = re.compile(r"sha256:([0-9a-f]{64})\Z")
+_ANALYSIS_ID_PATTERN = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z"
 )
 _T = TypeVar("_T")
 
@@ -152,21 +161,21 @@ class _PersistedRecordSafety:
         if record.status == "failed":
             if record.facts or record.signals or record.result or record.trace:
                 raise ValueError("failed record has partial success")
+            _validate_stored_record(record)
             return record
         if record.result is None or record.trace is None:
             raise ValueError("success is incomplete")
         if require_current_inputs:
             self._complete(record.facts, record.signals)
         self._versions(record)
-        self._evidence(record)
+        _validate_stored_record(record)
         surface = _decision_surface(self.profile, self.rubric)
         if set(record.trace.input_ids) != surface.input_ids:
             raise ValueError("trace input refs incomplete")
-        if record.trace.outbound_data_classes != [DataClass.PUBLIC_JOB_DATA]:
-            raise ValueError("unsafe outbound data class")
         return record
 
     def validate_stored(self, record: AnalysisRecord) -> None:
+        _validate_stored_record(record)
         trace = record.trace
         result = record.result
         if record.status != "success" or trace is None or result is None:
@@ -179,8 +188,6 @@ class _PersistedRecordSafety:
             raise ValueError("stored facts are duplicated")
         if len(signal_keys) != len(set(signal_keys)):
             raise ValueError("stored signals are duplicated")
-        if trace.analysis_id != record.id:
-            raise ValueError("stored trace identity mismatch")
         result_input_ids = {
             input_id
             for item in (
@@ -233,10 +240,6 @@ class _PersistedRecordSafety:
             != {trace.model_versions["signals"]}
         ):
             raise ValueError("stored signal metadata mismatch")
-        self._evidence(record)
-        if trace.outbound_data_classes != [DataClass.PUBLIC_JOB_DATA]:
-            raise ValueError("stored trace has unsafe outbound data")
-
     def _complete(
         self,
         facts: list[ExtractedFact],
@@ -297,49 +300,11 @@ class _PersistedRecordSafety:
         if result.model_versions != trace.model_versions:
             raise ValueError("model versions mismatch")
 
-    def _evidence(self, record: AnalysisRecord) -> None:
-        trace = record.trace
-        result = record.result
-        if trace is None or result is None:
-            raise ValueError("evidence missing")
-        job_refs = [
-            *(item for fact in record.facts for item in fact.evidence),
-            *(item for signal in record.signals for item in signal.evidence),
-            *(
-                item
-                for contribution in (
-                    result.preference_contributions
-                    + result.qualification_contributions
-                )
-                for item in contribution.job_evidence
-            ),
-            *(item for gap in result.gaps for item in gap.job_evidence),
-        ]
-        profile_refs = [
-            *(
-                item
-                for contribution in (
-                    result.preference_contributions
-                    + result.qualification_contributions
-                )
-                for item in contribution.candidate_evidence
-            ),
-            *(item for gap in result.gaps for item in gap.candidate_evidence),
-        ]
-        for item in job_refs:
-            _parse_jd_ref(item, self.job_digest)
-        if any(not item.startswith("profile-ref:v1:") for item in profile_refs):
-            raise ValueError("raw profile evidence")
-        for item in trace.evidence:
-            if item.startswith("profile-ref:v1:"):
-                continue
-            _parse_jd_ref(item, self.job_digest)
-
     def _jd_ref(self, start: int, end: int, value: str) -> str:
         ref = (
             f"jd-evidence:v1:{self.job_digest}:{start}:{end}:{_digest(value)}"
         )
-        _parse_jd_ref(ref, self.job_digest)
+        _parse_jd_ref(ref, self.job_digest, len(self.raw_job or ""))
         return ref
 
     def _signal_ref(self, value: str) -> str | None:
@@ -426,6 +391,7 @@ class JobAnalysisService:
                 AnalysisRecord(
                     id=analysis_id,
                     input_hash=input_hash,
+                    input_length=len(job_description),
                     facts=facts,
                     signals=signals,
                     result=result,
@@ -535,6 +501,13 @@ class JobAnalysisService:
                 "trace_unavailable",
                 "Decision trace is unavailable; choose a successful analysis ID.",
             )
+        failed = False
+        try:
+            _validate_stored_record(record)
+        except Exception:
+            failed = True
+        if failed:
+            raise AnalysisServiceError(_TRACE_CATEGORY, _TRACE_MESSAGE) from None
         return record.trace
 
     def list_analyzed_jobs(self) -> list[AnalysisSummary]:
@@ -569,6 +542,7 @@ class JobAnalysisService:
         failed = False
         try:
             analysis_id = self._id_factory()
+            _parse_analysis_id(analysis_id)
         except Exception:
             failed = True
             analysis_id = ""
@@ -760,15 +734,96 @@ def _decision_surface(
     )
 
 
-def _parse_jd_ref(value: str, expected_job_digest: str) -> tuple[int, int, str]:
+def _validate_stored_record(record: AnalysisRecord) -> None:
+    _parse_analysis_id(record.id)
+    if record.source_analysis_id is not None:
+        _parse_analysis_id(record.source_analysis_id)
+    job_digest = _parse_input_hash(record.input_hash)
+    trace = record.trace
+    result = record.result
+    if trace is None:
+        if record.status == "success":
+            raise ValueError("successful record has no trace")
+        return
+    if (
+        record.status != "success"
+        or result is None
+        or record.input_length is None
+    ):
+        raise ValueError("stored success metadata is incomplete")
+    _parse_analysis_id(trace.analysis_id)
+    if trace.analysis_id != record.id:
+        raise ValueError("stored trace identity mismatch")
+    if trace.outbound_data_classes != [DataClass.PUBLIC_JOB_DATA]:
+        raise ValueError("stored trace has unsafe outbound data")
+
+    job_refs = [
+        *(item for fact in record.facts for item in fact.evidence),
+        *(item for signal in record.signals for item in signal.evidence),
+        *(
+            item
+            for contribution in (
+                result.preference_contributions
+                + result.qualification_contributions
+            )
+            for item in contribution.job_evidence
+        ),
+        *(item for gap in result.gaps for item in gap.job_evidence),
+    ]
+    profile_refs = [
+        *(
+            item
+            for contribution in (
+                result.preference_contributions
+                + result.qualification_contributions
+            )
+            for item in contribution.candidate_evidence
+        ),
+        *(item for gap in result.gaps for item in gap.candidate_evidence),
+    ]
+    for item in job_refs:
+        _parse_jd_ref(item, job_digest, record.input_length)
+    for item in profile_refs:
+        _parse_profile_ref(item)
+    for item in trace.input_ids:
+        if item.startswith("profile-ref:"):
+            _parse_profile_ref(item)
+    for item in trace.evidence:
+        if _PROFILE_REF_PATTERN.fullmatch(item):
+            continue
+        _parse_jd_ref(item, job_digest, record.input_length)
+
+
+def _parse_jd_ref(
+    value: str,
+    expected_job_digest: str,
+    input_length: int,
+) -> tuple[int, int, str]:
     match = _JD_REF_PATTERN.fullmatch(value)
     if match is None or match.group(1) != expected_job_digest:
         raise ValueError("invalid JD evidence reference")
     start = int(match.group(2))
     end = int(match.group(3))
-    if start > end:
+    if start >= end or end > input_length:
         raise ValueError("invalid JD evidence span")
     return start, end, match.group(4)
+
+
+def _parse_profile_ref(value: str) -> None:
+    if _PROFILE_REF_PATTERN.fullmatch(value) is None:
+        raise ValueError("invalid profile reference")
+
+
+def _parse_input_hash(value: str) -> str:
+    match = _INPUT_HASH_PATTERN.fullmatch(value)
+    if match is None:
+        raise ValueError("invalid input hash")
+    return match.group(1)
+
+
+def _parse_analysis_id(value: str) -> None:
+    if _ANALYSIS_ID_PATTERN.fullmatch(value) is None:
+        raise ValueError("invalid analysis ID")
 
 
 def _input_hash(value: str) -> str:
