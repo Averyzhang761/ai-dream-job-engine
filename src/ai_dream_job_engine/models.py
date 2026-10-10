@@ -367,6 +367,12 @@ class DecisionTrace(DomainModel):
     outbound_data_classes: list[DataClass] = Field(default_factory=list)
 
 
+class DecisionSurfaceManifest(DomainModel):
+    fact_ids: list[str] = Field(default_factory=list)
+    question_versions: dict[str, str] = Field(default_factory=dict)
+    profile_refs: list[str] = Field(default_factory=list)
+
+
 class AnalysisRecord(DomainModel):
     id: str = Field(min_length=1)
     source_analysis_id: str | None = None
@@ -376,6 +382,7 @@ class AnalysisRecord(DomainModel):
     signals: list[DecisionSignal] = Field(default_factory=list)
     result: DecisionResult | None = None
     trace: DecisionTrace | None = None
+    decision_surface: DecisionSurfaceManifest | None = None
     status: Literal["success", "failed"]
     latency_ms: int = Field(ge=0)
     error_category: str | None = None

@@ -183,6 +183,21 @@ def test_analyze_job_runs_extract_signals_decide_and_persist(tmp_path) -> None:
         JOB_DESCRIPTION.encode("utf-8")
     ).hexdigest()
     assert record.input_length == len(JOB_DESCRIPTION)
+    assert record.decision_surface is not None
+    assert record.decision_surface.fact_ids == ["job_title"]
+    assert record.decision_surface.question_versions == {
+        "role_fit": "question-v1"
+    }
+    assert record.decision_surface.profile_refs == sorted(
+        record.decision_surface.profile_refs
+    )
+    assert record.trace.input_ids == sorted(
+        {
+            *record.decision_surface.fact_ids,
+            *record.decision_surface.question_versions,
+            *record.decision_surface.profile_refs,
+        }
+    )
     assert record.latency_ms == 25
     assert store.list_analyses() == [record]
     assert service.list_analyzed_jobs()[0].job_title == "Senior Python Engineer"
@@ -302,6 +317,19 @@ def test_recompute_uses_current_rubric_missing_and_stale_semantics(tmp_path) -> 
         "role_fit": "question-v2",
         "new_signal": "question-v1",
     }
+    assert recomputed.decision_surface is not None
+    assert recomputed.decision_surface.fact_ids == ["new_fact"]
+    assert recomputed.decision_surface.question_versions == {
+        "role_fit": "question-v2",
+        "new_signal": "question-v1",
+    }
+    assert recomputed.trace.input_ids == sorted(
+        {
+            *recomputed.decision_surface.fact_ids,
+            *recomputed.decision_surface.question_versions,
+            *recomputed.decision_surface.profile_refs,
+        }
+    )
     assert original.facts[0].evidence[0] not in recomputed.trace.evidence
     assert original.signals[0].evidence[0] in recomputed.trace.evidence
     assert len(extractor.calls) == 1
@@ -564,6 +592,8 @@ def test_recompute_rejects_malformed_or_payload_bearing_jd_refs(
         "outbound_class",
         "input_length",
         "unbound_input",
+        "extra_profile_input",
+        "self_declared_question",
         "extra_evidence",
         "providers",
         "models",
@@ -605,6 +635,24 @@ def test_trace_read_rejects_malformed_stored_privacy_or_integrity_data(
                     *trace.input_ids,
                     "PRIVATE RESUME secret@example.com",
                 ]
+            }
+        )
+    elif corruption == "extra_profile_input":
+        trace = trace.model_copy(
+            update={
+                "input_ids": sorted(
+                    [*trace.input_ids, "profile-ref:v1:" + "0" * 64]
+                )
+            }
+        )
+    elif corruption == "self_declared_question":
+        trace = trace.model_copy(
+            update={
+                "input_ids": sorted([*trace.input_ids, "invented_question"]),
+                "question_versions": {
+                    **trace.question_versions,
+                    "invented_question": "invented-v1",
+                },
             }
         )
     elif corruption == "extra_evidence":

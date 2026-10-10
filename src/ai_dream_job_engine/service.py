@@ -22,6 +22,7 @@ from ai_dream_job_engine.models import (
     DataClass,
     DecisionResult,
     DecisionSignal,
+    DecisionSurfaceManifest,
     DecisionTrace,
     ExtractedFact,
     Rubric,
@@ -68,6 +69,7 @@ class _DecisionSurface:
     input_ids: frozenset[str]
     fact_ids: frozenset[str]
     question_versions: dict[str, str]
+    profile_refs: frozenset[str]
 
 
 class _PersistedRecordSafety:
@@ -159,7 +161,13 @@ class _PersistedRecordSafety:
         ):
             raise ValueError("record contains raw job")
         if record.status == "failed":
-            if record.facts or record.signals or record.result or record.trace:
+            if (
+                record.facts
+                or record.signals
+                or record.result
+                or record.trace
+                or record.decision_surface
+            ):
                 raise ValueError("failed record has partial success")
             _validate_stored_record(record)
             return record
@@ -170,7 +178,7 @@ class _PersistedRecordSafety:
         self._versions(record)
         _validate_stored_record(record)
         surface = _decision_surface(self.profile, self.rubric)
-        if set(record.trace.input_ids) != surface.input_ids:
+        if record.decision_surface != _surface_manifest(surface):
             raise ValueError("trace input refs incomplete")
         return record
 
@@ -313,6 +321,9 @@ class JobAnalysisService:
                     signals=signals,
                     result=result,
                     trace=trace,
+                    decision_surface=_surface_manifest(
+                        _decision_surface(safety.profile, rubric)
+                    ),
                     status="success",
                     latency_ms=_latency_ms(
                         started_at, self._monotonic_clock()
@@ -384,6 +395,9 @@ class JobAnalysisService:
                     update={
                         "result": result,
                         "trace": trace,
+                        "decision_surface": _surface_manifest(
+                            _decision_surface(safety.profile, rubric)
+                        ),
                         "latency_ms": _latency_ms(
                             started_at, self._monotonic_clock()
                         ),
@@ -631,17 +645,31 @@ def _decision_surface(
         item.id: item.version
         for item in sorted(rubric.questions, key=lambda item: item.id)
     }
+    profile_refs = frozenset(
+        {
+            profile.id,
+            *(claim.id for claim in profile.claims if claim.confirmed),
+        }
+    )
     return _DecisionSurface(
         input_ids=frozenset(
             {
-                profile.id,
-                *(claim.id for claim in profile.claims if claim.confirmed),
+                *profile_refs,
                 *fact_ids,
                 *question_versions,
             }
         ),
         fact_ids=fact_ids,
         question_versions=question_versions,
+        profile_refs=profile_refs,
+    )
+
+
+def _surface_manifest(surface: _DecisionSurface) -> DecisionSurfaceManifest:
+    return DecisionSurfaceManifest(
+        fact_ids=sorted(surface.fact_ids),
+        question_versions=surface.question_versions,
+        profile_refs=sorted(surface.profile_refs),
     )
 
 
@@ -659,6 +687,7 @@ def _validate_stored_record(record: AnalysisRecord) -> None:
     if (
         record.status != "success"
         or result is None
+        or record.decision_surface is None
         or record.input_length is None
         or record.input_length <= 0
     ):
@@ -668,6 +697,33 @@ def _validate_stored_record(record: AnalysisRecord) -> None:
         raise ValueError("stored trace identity mismatch")
     if trace.outbound_data_classes != [DataClass.PUBLIC_JOB_DATA]:
         raise ValueError("stored trace has unsafe outbound data")
+
+    manifest = record.decision_surface
+    if (
+        manifest.fact_ids != sorted(set(manifest.fact_ids))
+        or any(not item for item in manifest.fact_ids)
+        or list(manifest.question_versions) != sorted(manifest.question_versions)
+        or any(
+            not question_id or not version
+            for question_id, version in manifest.question_versions.items()
+        )
+        or manifest.profile_refs != sorted(set(manifest.profile_refs))
+    ):
+        raise ValueError("stored decision surface is not canonical")
+    for item in manifest.profile_refs:
+        _parse_profile_ref(item)
+    manifest_input_ids = sorted(
+        {
+            *manifest.fact_ids,
+            *manifest.question_versions,
+            *manifest.profile_refs,
+        }
+    )
+    if (
+        trace.input_ids != manifest_input_ids
+        or trace.question_versions != manifest.question_versions
+    ):
+        raise ValueError("stored trace inputs do not match decision surface")
 
     fact_ids = [item.fact_id for item in record.facts]
     signal_keys = [
@@ -687,8 +743,6 @@ def _validate_stored_record(record: AnalysisRecord) -> None:
         input_id for item in result_items for input_id in item.input_ids
     }
     traced_input_ids = set(trace.input_ids)
-    if trace.input_ids != sorted(traced_input_ids):
-        raise ValueError("stored trace inputs are not canonical")
     traced_profile_ids = {
         item for item in traced_input_ids if _PROFILE_REF_PATTERN.fullmatch(item)
     }
