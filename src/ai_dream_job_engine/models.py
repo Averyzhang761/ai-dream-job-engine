@@ -67,6 +67,22 @@ class ClaimImportOrigin(DomainModel):
     confirmed_value: Any
 
 
+class ClaimImportReceipt(DomainModel):
+    source_agent: str = Field(min_length=1)
+    candidate_id: str = Field(min_length=1)
+    confirmed_claim_id: str = Field(min_length=1)
+    confirmed_value: Any
+    origin: ClaimImportOrigin
+
+    @model_validator(mode="after")
+    def identity_matches_origin(self) -> ClaimImportReceipt:
+        if self.source_agent != self.origin.source_agent:
+            raise ValueError("receipt source_agent must match origin")
+        if self.candidate_id != self.origin.candidate_id:
+            raise ValueError("receipt candidate_id must match origin")
+        return self
+
+
 class CandidateClaim(DomainModel):
     id: str = Field(min_length=1)
     claim_type: str = Field(min_length=1)
@@ -97,6 +113,7 @@ class CandidateClaim(DomainModel):
 class CandidateProfile(DomainModel):
     id: str = "default"
     claims: list[CandidateClaim] = Field(default_factory=list)
+    import_receipts: list[ClaimImportReceipt] = Field(default_factory=list)
     version: str = "1"
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

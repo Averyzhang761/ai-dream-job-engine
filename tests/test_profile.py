@@ -150,9 +150,11 @@ def test_confirmed_memory_claim_becomes_user_confirmed_and_keeps_provenance() ->
     assert confirmed.provenance == suggestion.provenance
     assert confirmed.observed_at == suggestion.observed_at
     assert confirmed.confidence == suggestion.confidence
-    assert confirmed.import_origin is not None
-    assert confirmed.import_origin.candidate_id == suggestion.id
-    assert confirmed.import_origin.confirmed_value == confirmed.value
+    assert len(result.import_receipts) == 1
+    receipt = result.import_receipts[0]
+    assert receipt.candidate_id == suggestion.id
+    assert receipt.confirmed_claim_id == confirmed.id
+    assert receipt.origin.confirmed_value == confirmed.value
     assert suggestion.source is ClaimSource.AGENT_SUGGESTED
     assert suggestion.confirmed is False
 
@@ -446,18 +448,20 @@ def test_disconnect_can_remove_only_selected_source() -> None:
         claim.confirmed and claim.source_agent == "learning-agent"
         for claim in disconnected.claims
     )
+    assert {receipt.source_agent for receipt in disconnected.import_receipts} == {
+        "learning-agent"
+    }
     assert len(profile.claims) == 6
 
 
-def test_disconnect_preserves_forged_pair_with_different_manual_value() -> None:
+def test_disconnect_preserves_fully_forged_claim_without_profile_receipt() -> None:
     suggestion = memory_claim("forged-source", "location", "Remote")
     imported = confirm_claims(
         CandidateProfile(claims=[suggestion]),
         [ClaimDecision(claim_id="forged-source", action="accept")],
     )
     template = next(claim for claim in imported.claims if claim.confirmed)
-    forged = template.model_copy(update={"value": "On-site"}, deep=True)
-    profile = CandidateProfile(claims=[suggestion, forged])
+    profile = CandidateProfile(claims=[suggestion, template])
 
     disconnected = disconnect_memory_source(profile, "career-agent", True)
 

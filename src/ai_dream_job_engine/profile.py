@@ -14,6 +14,7 @@ from ai_dream_job_engine.models import (
     CandidateClaim,
     CandidateProfile,
     ClaimImportOrigin,
+    ClaimImportReceipt,
     ClaimDecision,
     ClaimSource,
     DataClass,
@@ -76,6 +77,22 @@ def _validate_profile(profile: CandidateProfile) -> None:
         if claim.import_origin is not None:
             _canonical_value(claim.import_origin.candidate_value)
             _canonical_value(claim.import_origin.confirmed_value)
+    seen_receipt_ids: set[str] = set()
+    duplicate_receipt_ids: set[str] = set()
+    for receipt in profile.import_receipts:
+        if receipt.confirmed_claim_id in seen_receipt_ids:
+            duplicate_receipt_ids.add(receipt.confirmed_claim_id)
+        seen_receipt_ids.add(receipt.confirmed_claim_id)
+    if duplicate_receipt_ids:
+        raise ValueError(
+            f"duplicate import receipt IDs: {', '.join(sorted(duplicate_receipt_ids))}"
+        )
+    for receipt in profile.import_receipts:
+        _canonical_value(receipt.origin.candidate_value)
+        if _canonical_value(receipt.confirmed_value) != _canonical_value(
+            receipt.origin.confirmed_value
+        ):
+            raise ValueError("receipt confirmed value must match origin")
 
 
 def _validate_memory_candidate(
@@ -250,6 +267,20 @@ def _confirmed_claim(candidate: CandidateClaim, value: Any) -> CandidateClaim:
     )
 
 
+def _import_receipt(
+    candidate: CandidateClaim, confirmed: CandidateClaim
+) -> ClaimImportReceipt:
+    if confirmed.import_origin is None:
+        raise ValueError("imported confirmation requires origin metadata")
+    return ClaimImportReceipt(
+        source_agent=candidate.source_agent,
+        candidate_id=candidate.id,
+        confirmed_claim_id=confirmed.id,
+        confirmed_value=confirmed.value,
+        origin=confirmed.import_origin.model_copy(deep=True),
+    )
+
+
 def _validate_decisions(decisions: Sequence[ClaimDecision]) -> None:
     seen: set[str] = set()
     duplicates: set[str] = set()
@@ -371,41 +402,72 @@ def confirm_claims(
             continue
         new_confirmed.append(confirmed)
 
+    existing_receipts = {
+        receipt.confirmed_claim_id: receipt for receipt in profile.import_receipts
+    }
+    new_receipts: list[ClaimImportReceipt] = []
+    for candidate, confirmed in accepted:
+        if candidate.source is not ClaimSource.AGENT_SUGGESTED:
+            continue
+        receipt = _import_receipt(candidate, confirmed)
+        existing_receipt = existing_receipts.get(receipt.confirmed_claim_id)
+        if existing_receipt is not None:
+            if existing_receipt != receipt:
+                raise ValueError(
+                    f"import receipt collision: {receipt.confirmed_claim_id}"
+                )
+            continue
+        new_receipts.append(receipt)
+
     claims = [
         *base_claims,
         *new_suggestions,
         *new_confirmed,
     ]
+    receipts = sorted(
+        [
+            *(receipt.model_copy(deep=True) for receipt in profile.import_receipts),
+            *new_receipts,
+        ],
+        key=lambda receipt: receipt.confirmed_claim_id,
+    )
     result_data = profile.model_dump()
     result_data["claims"] = [claim.model_dump() for claim in claims]
+    result_data["import_receipts"] = [
+        receipt.model_dump() for receipt in receipts
+    ]
     result = CandidateProfile.model_validate(result_data)
     _validate_profile(result)
     return result
 
 
-def _is_linked_import(claim: CandidateClaim, source_agent: str) -> bool:
-    origin = claim.import_origin
-    if origin is None or origin.source_agent != source_agent:
-        return False
+def _receipt_matches_claim(
+    receipt: ClaimImportReceipt, claim: CandidateClaim
+) -> bool:
+    origin = receipt.origin
     try:
         _canonical_value(origin.candidate_value)
-        confirmed_value_matches = _canonical_value(
-            origin.confirmed_value
-        ) == _canonical_value(claim.value)
+        confirmed_key = _canonical_value(receipt.confirmed_value)
+        confirmed_value_matches = (
+            confirmed_key
+            == _canonical_value(origin.confirmed_value)
+            == _canonical_value(claim.value)
+        )
     except ValueError:
         return False
     provenance = urlsplit(origin.provenance)
     return (
         provenance.scheme == "agent-memory"
-        and provenance.netloc == source_agent
-        and provenance.path == f"/{origin.candidate_id}"
+        and provenance.netloc == receipt.source_agent
+        and provenance.path == f"/{receipt.candidate_id}"
         and confirmed_value_matches
-        and claim.id == _confirmed_claim_id(claim, origin)
+        and claim.id == receipt.confirmed_claim_id
         and claim.source is ClaimSource.USER_CONFIRMED
         and claim.confirmed
         and claim.claim_type == origin.claim_type
         and claim.provenance == origin.provenance
         and claim.source_agent == origin.source_agent
+        and claim.import_origin == origin
     )
 
 
@@ -418,9 +480,26 @@ def disconnect_memory_source(
     if not delete_imported:
         return profile.model_copy(deep=True)
 
+    claims_by_id = {claim.id: claim for claim in profile.claims}
+    matched_receipt_ids = {
+        receipt.confirmed_claim_id
+        for receipt in profile.import_receipts
+        if receipt.source_agent == source_agent
+        and receipt.confirmed_claim_id in claims_by_id
+        and _receipt_matches_claim(
+            receipt, claims_by_id[receipt.confirmed_claim_id]
+        )
+    }
     claims = [
         claim.model_copy(deep=True)
         for claim in profile.claims
-        if not _is_linked_import(claim, source_agent)
+        if claim.id not in matched_receipt_ids
     ]
-    return profile.model_copy(update={"claims": claims}, deep=True)
+    receipts = [
+        receipt.model_copy(deep=True)
+        for receipt in profile.import_receipts
+        if receipt.confirmed_claim_id not in matched_receipt_ids
+    ]
+    return profile.model_copy(
+        update={"claims": claims, "import_receipts": receipts}, deep=True
+    )

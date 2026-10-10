@@ -9,10 +9,12 @@ from ai_dream_job_engine.models import (
     AnalysisRecord,
     CandidateClaim,
     CandidateProfile,
+    ClaimDecision,
     ClaimSource,
     DecisionTrace,
     Rubric,
 )
+from ai_dream_job_engine.profile import confirm_claims, disconnect_memory_source
 
 
 def _create_version_one_schema(connection, *, malformed_profiles=False) -> None:
@@ -84,6 +86,32 @@ def test_profile_round_trip_preserves_claim_sources(tmp_path) -> None:
 
     assert store.load_profile() == profile
     assert store.load_profile().claims[0].source is ClaimSource.AGENT_SUGGESTED
+
+
+def test_profile_round_trip_preserves_import_receipt_and_disconnects(tmp_path) -> None:
+    store = LocalStore.open(tmp_path / "store.sqlite3")
+    store.initialize()
+    suggestion = CandidateClaim(
+        id="memory-1",
+        claim_type="location",
+        value="Remote",
+        source=ClaimSource.AGENT_SUGGESTED,
+        provenance="agent-memory://career-agent/memory-1",
+        source_agent="career-agent",
+    )
+    profile = confirm_claims(
+        CandidateProfile(claims=[suggestion]),
+        [ClaimDecision(claim_id="memory-1", action="accept")],
+    )
+
+    store.save_profile(profile)
+    loaded = store.load_profile()
+
+    assert loaded == profile
+    assert len(loaded.import_receipts) == 1
+    disconnected = disconnect_memory_source(loaded, "career-agent", True)
+    assert [claim.id for claim in disconnected.claims] == ["memory-1"]
+    assert disconnected.import_receipts == []
 
 
 def test_rubric_round_trip_preserves_version(tmp_path) -> None:
