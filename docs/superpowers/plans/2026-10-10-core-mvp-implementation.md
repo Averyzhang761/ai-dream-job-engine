@@ -16,6 +16,8 @@
 - Do not copy the old repository's Git history, real JD dataset, personal job library, credentials, logs, cache, or virtual environment.
 - Personal state is local SQLite; API keys come only from environment variables or host secret storage.
 - Agent memory import is off by default. The MCP server receives only user-authorized candidate claims supplied by the host Agent; it never scans host memory.
+- Scheduling belongs to the host Agent. The plugin must not create its own scheduler, heartbeat process, or notification center.
+- Future automation-facing workflows must use `no_change`, `updated`, `needs_review`, or `failed`; `no_change` is quiet by default and consequential actions still require user confirmation.
 - `agent_suggested` claims cannot influence decisions until the user confirms them.
 - Resume absence means `evidence_gap`, never `capability_gap`.
 - Models extract facts or return decision signals; deterministic Python code owns weights, blockers, thresholds, and recommendations.
@@ -371,7 +373,7 @@ ai-dream-job-engine/
 
 - [ ] **Step 1: Write failing MCP contract and manifest tests**
 
-  Add `test_expected_tool_names_are_registered`, `test_tool_schemas_use_domain_contracts`, `test_memory_preview_requires_explicit_source_and_scope`, `test_analyze_tool_returns_structured_result`, `test_plugin_manifest_points_to_mcp_config_and_skill`, and `test_start_script_uses_repo_local_project`.
+  Add `test_expected_tool_names_are_registered`, `test_tool_schemas_use_domain_contracts`, `test_memory_preview_requires_explicit_source_and_scope`, `test_analyze_tool_returns_structured_result`, `test_plugin_manifest_points_to_mcp_config_and_skill`, `test_skill_declares_host_owned_automation_boundary`, and `test_start_script_uses_repo_local_project`.
 
 - [ ] **Step 2: Run tests and verify they fail**
 
@@ -385,7 +387,7 @@ ai-dream-job-engine/
 
 - [ ] **Step 4: Add the Codex packaging and conversational Skill**
 
-  The plugin manifest uses name `ai-dream-job-engine`, version `0.1.0`, `skills: "./skills/"`, and `mcpServers: "./.mcp.json"`. The Skill must ask consent before memory import, require claim confirmation, label unknowns, avoid unsupported capability claims, and require user confirmation before any future application action. `scripts/start-mcp.sh` starts the project through `uv run --project` and does not embed secrets.
+  The plugin manifest uses name `ai-dream-job-engine`, version `0.1.0`, `skills: "./skills/"`, and `mcpServers: "./.mcp.json"`. The Skill must ask consent before memory import, require claim confirmation, label unknowns, avoid unsupported capability claims, and require user confirmation before any future application action. It must state that schedules and notifications are owned by the host Agent, define quiet `no_change` behavior, and reserve future coarse-grained automation workflows for job discovery and Gmail status sync. `scripts/start-mcp.sh` starts the project through `uv run --project` and does not embed secrets.
 
 - [ ] **Step 5: Run MCP tests and a local protocol smoke test**
 
