@@ -1,5 +1,7 @@
 import json
 from pathlib import Path
+import platform
+import sys
 
 import pytest
 from packaging.markers import Marker
@@ -178,6 +180,9 @@ def test_mcp_dependency_uses_only_platform_bound_cryptography_cap() -> None:
         'and platform_machine == \'x86_64\'"'
     ) in project
     assert 'cryptography<47' not in project
-    assert Marker(
+    marker_applies = Marker(
         "sys_platform == 'darwin' and platform_machine == 'x86_64'"
     ).evaluate()
+    assert marker_applies is (
+        sys.platform == "darwin" and platform.machine() == "x86_64"
+    )

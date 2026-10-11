@@ -673,6 +673,59 @@ def test_available_version_matched_signal_needs_no_quote() -> None:
     ]
 
 
+def test_lower_is_better_unmatched_text_becomes_evidence_gap() -> None:
+    rubric = Rubric(
+        version="lower-text-v1",
+        facts=[
+            FactDefinition(
+                id="infrastructure_scope",
+                name="Infrastructure scope",
+                definition="How infrastructure-heavy the role is.",
+                data_type="text",
+                extraction_instructions="Extract infrastructure scope.",
+            )
+        ],
+        dimensions=[
+            ValueDimension(
+                id="infrastructure_balance",
+                name="Infrastructure balance",
+                definition="Prefer work that is not pure infrastructure.",
+                fact_ids=["infrastructure_scope"],
+                weight=1,
+                scoring_direction="lower_is_better",
+                positive_keywords=["pure infrastructure"],
+                negative_keywords=["product integration"],
+            )
+        ],
+        recommendation_thresholds={
+            RecommendationLevel.PRIORITY_APPLY: 0.8,
+            RecommendationLevel.APPLY_AFTER_REVIEW: 0.6,
+            RecommendationLevel.HOLD: 0.4,
+            RecommendationLevel.SKIP: 0,
+        },
+    )
+
+    result = decide_job(
+        [
+            _fact(
+                "infrastructure_scope",
+                "The role contains backend and maintenance duties.",
+                "Backend development",
+            )
+        ],
+        [],
+        CandidateProfile(),
+        rubric,
+    )
+
+    assert result.recommendation is RecommendationLevel.APPLY_AFTER_REVIEW
+    assert any(
+        gap.kind is GapKind.EVIDENCE_GAP
+        and gap.subject_id == "infrastructure_balance"
+        for gap in result.gaps
+    )
+
+
 @pytest.mark.parametrize("unknown", [False, True])
 def test_configured_default_is_typed_and_auditable(unknown: bool) -> None:
     rubric = _rubric()

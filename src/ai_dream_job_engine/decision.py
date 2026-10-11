@@ -270,6 +270,8 @@ def _dimension_score(value: Any, dimension: ValueDimension) -> float | None:
             score = None if positive == negative else float(positive)
     else:
         return None
+    if score is None:
+        return None
     if dimension.scoring_direction is ScoringDirection.LOWER_IS_BETTER:
         return 1 - score
     return score
