@@ -948,6 +948,42 @@ def test_empty_confirmed_list_is_an_explicit_capability_gap() -> None:
     assert any(gap.kind is GapKind.CAPABILITY_GAP for gap in result.gaps)
 
 
+def test_non_exhaustive_resume_skill_list_does_not_infer_missing_capability() -> None:
+    rubric = load_default_rubric()
+    facts = [
+        ExtractedFact(fact_id=item.id, is_unknown=True, evidence=["not needed here"])
+        for item in rubric.facts
+    ]
+    skills_index = next(
+        index for index, fact in enumerate(facts) if fact.fact_id == "required_skills"
+    )
+    facts[skills_index] = _fact(
+        "required_skills",
+        ["Python", "Docker"],
+        "JD requires Python and Docker",
+    )
+    claim = CandidateClaim(
+        id="resume-skills",
+        claim_type="required_skills",
+        value=["Python"],
+        value_is_exhaustive=False,
+        source=ClaimSource.RESUME_EVIDENCE,
+        confirmed=True,
+        source_quote="Resume lists Python.",
+    )
+
+    result = decide_job(facts, [], CandidateProfile(claims=[claim]), rubric)
+
+    gap = next(item for item in result.gaps if item.subject_id == "required_skills")
+    assert gap.kind is GapKind.EVIDENCE_GAP
+    assert gap.candidate_evidence == ["Resume lists Python."]
+    assert not any(
+        item.kind is GapKind.CAPABILITY_GAP
+        and item.subject_id == "required_skills"
+        for item in result.gaps
+    )
+
+
 def test_list_with_unknown_candidate_value_requires_review() -> None:
     rubric = _rubric()
     rubric.facts[1] = _with_fact_type(rubric.facts[1], "list")

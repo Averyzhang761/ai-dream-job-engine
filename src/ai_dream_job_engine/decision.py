@@ -38,6 +38,7 @@ class _Value:
     evidence: tuple[str, ...]
     audit_support: tuple[str, ...]
     missing_evidence: bool
+    value_is_exhaustive: bool = True
 
     @property
     def ready(self) -> bool:
@@ -132,7 +133,12 @@ def _normalize(
             evidence = ()
         value = _typed(definitions[claim.claim_type], claim.value, "candidate claim")
         claims.setdefault(claim.claim_type, []).append(
-            _normalized_value(claim.id, value, evidence)
+            _normalized_value(
+                claim.id,
+                value,
+                evidence,
+                value_is_exhaustive=claim.value_is_exhaustive,
+            )
         )
     return _Inputs(
         normalized_facts,
@@ -171,10 +177,23 @@ def _normalize_signal(question_id: str, version: str, signal: DecisionSignal | N
     return _Value(signal.question_id, value, evidence, audit_support, not evidence)
 
 
-def _normalized_value(input_id: str, value: Any, evidence: tuple[str, ...]) -> _Value:
+def _normalized_value(
+    input_id: str,
+    value: Any,
+    evidence: tuple[str, ...],
+    *,
+    value_is_exhaustive: bool = True,
+) -> _Value:
     if _unknown(value) or not evidence:
         value = _UNRESOLVED
-    return _Value(input_id, value, evidence, (), not evidence)
+    return _Value(
+        input_id,
+        value,
+        evidence,
+        (),
+        not evidence,
+        value_is_exhaustive,
+    )
 
 
 def _default_or_unresolved(definition: FactDefinition) -> _Value:
@@ -306,7 +325,7 @@ def _qualification(
             )
             continue
         claims = inputs.claims.get(definition.id, ())
-        conflicts = [
+        incompatible = [
             item
             for item in claims
             if item.ready
@@ -314,6 +333,13 @@ def _qualification(
                 fact.value, item.value, definition.candidate_comparison
             )
         ]
+        partial = [
+            item
+            for item in incompatible
+            if definition.candidate_comparison == "required_subset"
+            and not item.value_is_exhaustive
+        ]
+        conflicts = [item for item in incompatible if item not in partial]
         matches = [
             item
             for item in claims
@@ -342,7 +368,7 @@ def _qualification(
         elif matches:
             contributions.append(_qualification_contribution(definition.id, fact, matches[0], 1, weight))
         else:
-            claim = unresolved[0] if unresolved else None
+            claim = unresolved[0] if unresolved else (partial[0] if partial else None)
             gaps.append(
                 _missing_gap(
                     definition.id,

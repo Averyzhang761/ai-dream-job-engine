@@ -87,6 +87,7 @@ class CandidateClaim(DomainModel):
     id: str = Field(min_length=1)
     claim_type: str = Field(min_length=1)
     value: Any
+    value_is_exhaustive: bool = True
     source: ClaimSource
     confirmed: bool = False
     source_quote: str | None = None
