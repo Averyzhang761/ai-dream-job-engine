@@ -103,8 +103,9 @@ describe("EvidenceView", () => {
     const mock = bridge();
     render(<EvidenceView bridge={mock.value} initialClaims={profile.claims} claimPreview={null} />);
     expect(mock.messages).toHaveLength(0);
+    expect(screen.getByRole("button", { name: "让 Agent 生成候选" })).toBeDisabled();
     await user.click(screen.getByRole("checkbox", { name: "项目" }));
-    await user.click(screen.getByRole("button", { name: "同步 Agent Memory" }));
+    await user.click(screen.getByRole("button", { name: "让 Agent 生成候选" }));
     expect(mock.messages).toHaveLength(1);
     expect(mock.messages[0]).toContain("项目");
     expect(mock.messages[0]).toContain("预览");

@@ -73,6 +73,23 @@ function bridge(activeRubric: Rubric = rubric) {
 describe("RubricView", () => {
   afterEach(() => cleanup());
 
+  it("uses dropdowns to edit one fact and one dimension at a time", async () => {
+    const user = userEvent.setup();
+    const expandedRubric = structuredClone(rubric);
+    expandedRubric.facts.push({ ...expandedRubric.facts[0], id: "salary", name: "薪资范围" });
+    expandedRubric.dimensions.push({ ...expandedRubric.dimensions[0], id: "growth", name: "成长空间" });
+    render(<RubricView bridge={bridge(expandedRubric).value} selectedAnalysisId={null} onRecomputed={vi.fn()} />);
+
+    expect(await screen.findByRole("combobox", { name: "选择事实字段" })).toHaveValue("0");
+    expect(screen.getByRole("combobox", { name: "选择价值维度" })).toHaveValue("0");
+    expect(screen.getByRole("group", { name: "编辑：工作地点" })).toBeVisible();
+    expect(screen.queryByRole("group", { name: "编辑：薪资范围" })).not.toBeInTheDocument();
+    expect(screen.getAllByText("高级设置")).toHaveLength(2);
+    await user.selectOptions(screen.getByRole("combobox", { name: "选择事实字段" }), "1");
+    expect(screen.getByRole("group", { name: "编辑：薪资范围" })).toBeVisible();
+    expect(screen.queryByRole("group", { name: "编辑：工作地点" })).not.toBeInTheDocument();
+  });
+
   it("renders server definitions and sends only changed declarative fields", async () => {
     const user = userEvent.setup();
     const mock = bridge();

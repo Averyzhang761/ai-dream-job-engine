@@ -1,4 +1,4 @@
-import { Plus, RotateCcw, Save } from "lucide-react";
+import { Plus, RotateCcw, Save, SlidersHorizontal } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import type { McpAppBridge } from "../bridge";
@@ -138,6 +138,8 @@ export function RubricView({
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
+  const [selectedFactIndex, setSelectedFactIndex] = useState(0);
+  const [selectedDimensionIndex, setSelectedDimensionIndex] = useState(0);
 
   useEffect(() => {
     let active = true;
@@ -172,6 +174,18 @@ export function RubricView({
       ...current,
       dimensions: current.dimensions.map((dimension, itemIndex) => itemIndex === index ? { ...dimension, ...changes } : dimension),
     }));
+  };
+
+  const addFact = () => {
+    const index = draft.facts.length;
+    setDraft({ ...draft, facts: [...draft.facts, emptyFact()] });
+    setSelectedFactIndex(index);
+  };
+
+  const addDimension = () => {
+    const index = draft.dimensions.length;
+    setDraft({ ...draft, dimensions: [...draft.dimensions, emptyDimension()] });
+    setSelectedDimensionIndex(index);
   };
 
   const validate = () => {
@@ -285,52 +299,64 @@ export function RubricView({
       </header>
 
       <section className="editor-section" aria-labelledby="facts-heading">
-        <div className="section-heading"><h3 id="facts-heading">事实字段</h3><button type="button" onClick={() => setDraft({ ...draft, facts: [...draft.facts, emptyFact()] })}><Plus size={14} aria-hidden="true" />新增事实字段</button></div>
-        <div className="definition-list">
-          {draft.facts.map((fact, index) => (
-            <fieldset className="definition-editor" key={`${fact.id || "new"}-${index}`}>
-              <legend>{fact.name || "新事实字段"}</legend>
-              <label>ID<input value={fact.id} disabled={index < baseline.facts.length} onChange={(event) => updateFact(index, { id: event.target.value.trim() })} /></label>
-              <label>名称<input aria-label={`事实名称 ${fact.id}`} value={fact.name} onChange={(event) => updateFact(index, { name: event.target.value })} /></label>
-              <label className="wide-field">定义<textarea value={fact.definition} onChange={(event) => updateFact(index, { definition: event.target.value })} /></label>
-              <label>数据类型<select value={fact.data_type} onChange={(event) => updateFact(index, { data_type: event.target.value as FactDefinition["data_type"] })}><option value="boolean">布尔</option><option value="number">数字</option><option value="text">文本</option><option value="enum">枚举</option><option value="list">列表</option></select></label>
-              <label>候选人比较<select value={fact.candidate_comparison} onChange={(event) => updateFact(index, { candidate_comparison: event.target.value as CandidateComparison })}>{Object.entries(comparisonLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
-              <label className="wide-field">提取说明<textarea value={fact.extraction_instructions} onChange={(event) => updateFact(index, { extraction_instructions: event.target.value })} /></label>
-              <label>胜任力权重<input aria-label={`事实权重 ${fact.id}`} inputMode="decimal" value={String(fact.qualification_weight)} onChange={(event) => updateFact(index, { qualification_weight: Number(event.target.value) })} /></label>
-              <label>缺失处理<select value={fact.missing_policy} onChange={(event) => updateFact(index, { missing_policy: event.target.value as FactDefinition["missing_policy"] })}><option value="unknown">标记未知</option><option value="default">使用默认值</option></select></label>
-              <label className="checkbox-field"><input type="checkbox" checked={fact.requires_evidence} onChange={(event) => updateFact(index, { requires_evidence: event.target.checked })} />要求 JD 原文证据</label>
-              <label>枚举值（逗号分隔）<input value={fact.enum_values.join(", ")} onChange={(event) => updateFact(index, { enum_values: splitList(event.target.value) })} /></label>
-              <label>默认值{fact.data_type === "boolean" ? <select aria-label={`事实默认值 ${fact.id}`} disabled={fact.missing_policy !== "default"} value={String(fact.default_value ?? false)} onChange={(event) => updateFact(index, { default_value: event.target.value === "true" })}><option value="false">否</option><option value="true">是</option></select> : <input aria-label={`事实默认值 ${fact.id}`} disabled={fact.missing_policy !== "default"} value={fact.default_value === null ? "" : Array.isArray(fact.default_value) ? fact.default_value.join(", ") : String(fact.default_value)} onChange={(event) => updateFact(index, { default_value: parseDefaultInput(fact, event.target.value) })} />}</label>
-            </fieldset>
-          ))}
-        </div>
+        <div className="section-heading"><div><h3 id="facts-heading">事实字段</h3><span>{draft.facts.length} 项</span></div><button aria-label="新增事实字段" type="button" onClick={addFact}><Plus size={14} aria-hidden="true" />新增</button></div>
+        <label className="definition-selector">选择要修改的事实<select aria-label="选择事实字段" value={selectedFactIndex} onChange={(event) => setSelectedFactIndex(Number(event.target.value))}>{draft.facts.map((fact, index) => <option value={index} key={`${fact.id || "new"}-${index}`}>{fact.name || "新事实"} · {fact.data_type} · 权重 {fact.qualification_weight}</option>)}</select></label>
+        {draft.facts[selectedFactIndex] && (() => {
+          const fact = draft.facts[selectedFactIndex];
+          const index = selectedFactIndex;
+          return <fieldset className="definition-editor definition-editor--selected">
+            <legend>编辑：{fact.name || "新事实字段"}</legend>
+            <label>名称<input aria-label={`事实名称 ${fact.id}`} value={fact.name} onChange={(event) => updateFact(index, { name: event.target.value })} /></label>
+            <label>候选人比较<select value={fact.candidate_comparison} onChange={(event) => updateFact(index, { candidate_comparison: event.target.value as CandidateComparison })}>{Object.entries(comparisonLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
+            <label className="wide-field">定义<textarea value={fact.definition} onChange={(event) => updateFact(index, { definition: event.target.value })} /></label>
+            <label>胜任力权重<input aria-label={`事实权重 ${fact.id}`} inputMode="decimal" value={String(fact.qualification_weight)} onChange={(event) => updateFact(index, { qualification_weight: Number(event.target.value) })} /></label>
+            <label className="checkbox-field"><input type="checkbox" checked={fact.requires_evidence} onChange={(event) => updateFact(index, { requires_evidence: event.target.checked })} />要求 JD 原文证据</label>
+            <details className="advanced-fields wide-field">
+              <summary><SlidersHorizontal size={14} aria-hidden="true" />高级设置</summary>
+              <div className="advanced-field-grid">
+                <label>ID<input value={fact.id} disabled={index < baseline.facts.length} onChange={(event) => updateFact(index, { id: event.target.value.trim() })} /></label>
+                <label>数据类型<select value={fact.data_type} onChange={(event) => updateFact(index, { data_type: event.target.value as FactDefinition["data_type"] })}><option value="boolean">布尔</option><option value="number">数字</option><option value="text">文本</option><option value="enum">枚举</option><option value="list">列表</option></select></label>
+                <label className="wide-field">提取说明<textarea value={fact.extraction_instructions} onChange={(event) => updateFact(index, { extraction_instructions: event.target.value })} /></label>
+                <label>缺失处理<select value={fact.missing_policy} onChange={(event) => updateFact(index, { missing_policy: event.target.value as FactDefinition["missing_policy"] })}><option value="unknown">标记未知</option><option value="default">使用默认值</option></select></label>
+                <label>枚举值（逗号分隔）<input value={fact.enum_values.join(", ")} onChange={(event) => updateFact(index, { enum_values: splitList(event.target.value) })} /></label>
+                <label>默认值{fact.data_type === "boolean" ? <select aria-label={`事实默认值 ${fact.id}`} disabled={fact.missing_policy !== "default"} value={String(fact.default_value ?? false)} onChange={(event) => updateFact(index, { default_value: event.target.value === "true" })}><option value="false">否</option><option value="true">是</option></select> : <input aria-label={`事实默认值 ${fact.id}`} disabled={fact.missing_policy !== "default"} value={fact.default_value === null ? "" : Array.isArray(fact.default_value) ? fact.default_value.join(", ") : String(fact.default_value)} onChange={(event) => updateFact(index, { default_value: parseDefaultInput(fact, event.target.value) })} />}</label>
+              </div>
+            </details>
+          </fieldset>;
+        })()}
       </section>
 
       <section className="editor-section" aria-labelledby="dimensions-heading">
-        <div className="section-heading"><h3 id="dimensions-heading">价值维度</h3><button type="button" onClick={() => setDraft({ ...draft, dimensions: [...draft.dimensions, emptyDimension()] })}><Plus size={14} aria-hidden="true" />新增价值维度</button></div>
-        <div className="definition-list">
-          {draft.dimensions.map((dimension, index) => (
-            <fieldset className="definition-editor" key={`${dimension.id || "new"}-${index}`}>
-              <legend>{dimension.name || "新价值维度"}</legend>
-              <label>ID<input value={dimension.id} disabled={index < baseline.dimensions.length} onChange={(event) => updateDimension(index, { id: event.target.value.trim() })} /></label>
-              <label>名称<input aria-label={`维度名称 ${dimension.id}`} value={dimension.name} onChange={(event) => updateDimension(index, { name: event.target.value })} /></label>
-              <label className="wide-field">定义<textarea value={dimension.definition} onChange={(event) => updateDimension(index, { definition: event.target.value })} /></label>
-              <label>权重<input aria-label={`维度权重 ${dimension.id}`} inputMode="decimal" value={Number.isNaN(dimension.weight) ? "" : String(dimension.weight)} onChange={(event) => updateDimension(index, { weight: event.target.value === "" ? Number.NaN : Number(event.target.value) })} /></label>
-              <label>计分方向<select value={dimension.scoring_direction} onChange={(event) => updateDimension(index, { scoring_direction: event.target.value as ValueDimension["scoring_direction"] })}><option value="higher_is_better">越高越好</option><option value="lower_is_better">越低越好</option></select></label>
-              <label>阈值<input inputMode="decimal" value={dimension.threshold ?? ""} onChange={(event) => updateDimension(index, { threshold: event.target.value === "" ? null : Number(event.target.value) })} /></label>
-              <label className="checkbox-field"><input type="checkbox" checked={dimension.hard_constraint} onChange={(event) => updateDimension(index, { hard_constraint: event.target.checked })} />硬性约束</label>
-              <label>正向关键词<input value={dimension.positive_keywords.join(", ")} onChange={(event) => updateDimension(index, { positive_keywords: splitList(event.target.value) })} /></label>
-              <label>负向关键词<input value={dimension.negative_keywords.join(", ")} onChange={(event) => updateDimension(index, { negative_keywords: splitList(event.target.value) })} /></label>
-              <label>示例<input value={dimension.examples.join(", ")} onChange={(event) => updateDimension(index, { examples: splitList(event.target.value) })} /></label>
-              <label className="wide-field">解释模板<textarea value={dimension.explanation_template ?? ""} onChange={(event) => updateDimension(index, { explanation_template: event.target.value || null })} /></label>
-              <div className="reference-picker wide-field"><span>引用事实</span>{draft.facts.filter((fact) => fact.id).map((fact) => <label className="checkbox-field" key={fact.id}><input type="checkbox" checked={dimension.fact_ids.includes(fact.id)} onChange={(event) => updateDimension(index, { fact_ids: event.target.checked ? [...dimension.fact_ids, fact.id] : dimension.fact_ids.filter((id) => id !== fact.id) })} />{fact.name || fact.id}</label>)}</div>
-              <div className="reference-picker wide-field"><span>引用信号</span>{draft.questions.map((question) => <label className="checkbox-field" key={question.id}><input type="checkbox" checked={dimension.signal_ids.includes(question.id)} onChange={(event) => updateDimension(index, { signal_ids: event.target.checked ? [...dimension.signal_ids, question.id] : dimension.signal_ids.filter((id) => id !== question.id) })} />{question.question}</label>)}</div>
-            </fieldset>
-          ))}
-        </div>
+        <div className="section-heading"><div><h3 id="dimensions-heading">价值维度</h3><span>{draft.dimensions.length} 项</span></div><button aria-label="新增价值维度" type="button" onClick={addDimension}><Plus size={14} aria-hidden="true" />新增</button></div>
+        <label className="definition-selector">选择要修改的维度<select aria-label="选择价值维度" value={selectedDimensionIndex} onChange={(event) => setSelectedDimensionIndex(Number(event.target.value))}>{draft.dimensions.map((dimension, index) => <option value={index} key={`${dimension.id || "new"}-${index}`}>{dimension.name || "新维度"} · 权重 {dimension.weight}{dimension.hard_constraint ? " · 硬约束" : ""}</option>)}</select></label>
+        {draft.dimensions[selectedDimensionIndex] && (() => {
+          const dimension = draft.dimensions[selectedDimensionIndex];
+          const index = selectedDimensionIndex;
+          return <fieldset className="definition-editor definition-editor--selected">
+            <legend>编辑：{dimension.name || "新价值维度"}</legend>
+            <label>名称<input aria-label={`维度名称 ${dimension.id}`} value={dimension.name} onChange={(event) => updateDimension(index, { name: event.target.value })} /></label>
+            <label>权重<input aria-label={`维度权重 ${dimension.id}`} inputMode="decimal" value={Number.isNaN(dimension.weight) ? "" : String(dimension.weight)} onChange={(event) => updateDimension(index, { weight: event.target.value === "" ? Number.NaN : Number(event.target.value) })} /></label>
+            <label className="wide-field">定义<textarea value={dimension.definition} onChange={(event) => updateDimension(index, { definition: event.target.value })} /></label>
+            <label>阈值<input inputMode="decimal" value={dimension.threshold ?? ""} onChange={(event) => updateDimension(index, { threshold: event.target.value === "" ? null : Number(event.target.value) })} /></label>
+            <label className="checkbox-field"><input type="checkbox" checked={dimension.hard_constraint} onChange={(event) => updateDimension(index, { hard_constraint: event.target.checked })} />硬性约束</label>
+            <details className="advanced-fields wide-field">
+              <summary><SlidersHorizontal size={14} aria-hidden="true" />高级设置</summary>
+              <div className="advanced-field-grid">
+                <label>ID<input value={dimension.id} disabled={index < baseline.dimensions.length} onChange={(event) => updateDimension(index, { id: event.target.value.trim() })} /></label>
+                <label>计分方向<select value={dimension.scoring_direction} onChange={(event) => updateDimension(index, { scoring_direction: event.target.value as ValueDimension["scoring_direction"] })}><option value="higher_is_better">越高越好</option><option value="lower_is_better">越低越好</option></select></label>
+                <label>正向关键词<input value={dimension.positive_keywords.join(", ")} onChange={(event) => updateDimension(index, { positive_keywords: splitList(event.target.value) })} /></label>
+                <label>负向关键词<input value={dimension.negative_keywords.join(", ")} onChange={(event) => updateDimension(index, { negative_keywords: splitList(event.target.value) })} /></label>
+                <label>示例<input value={dimension.examples.join(", ")} onChange={(event) => updateDimension(index, { examples: splitList(event.target.value) })} /></label>
+                <label className="wide-field">解释模板<textarea value={dimension.explanation_template ?? ""} onChange={(event) => updateDimension(index, { explanation_template: event.target.value || null })} /></label>
+                <div className="reference-picker wide-field"><span>引用事实</span>{draft.facts.filter((fact) => fact.id).map((fact) => <label className="checkbox-field" key={fact.id}><input type="checkbox" checked={dimension.fact_ids.includes(fact.id)} onChange={(event) => updateDimension(index, { fact_ids: event.target.checked ? [...dimension.fact_ids, fact.id] : dimension.fact_ids.filter((id) => id !== fact.id) })} />{fact.name || fact.id}</label>)}</div>
+                <div className="reference-picker wide-field"><span>引用信号</span>{draft.questions.map((question) => <label className="checkbox-field" key={question.id}><input type="checkbox" checked={dimension.signal_ids.includes(question.id)} onChange={(event) => updateDimension(index, { signal_ids: event.target.checked ? [...dimension.signal_ids, question.id] : dimension.signal_ids.filter((id) => id !== question.id) })} />{question.question}</label>)}</div>
+              </div>
+            </details>
+          </fieldset>;
+        })()}
       </section>
 
-      <section className="editor-section thresholds" aria-labelledby="threshold-heading"><h3 id="threshold-heading">推荐阈值</h3><div className="field-grid">{recommendationLevels.map((level) => <label key={level}>{levelLabels[level]}<input aria-label={`${levelLabels[level]}阈值`} inputMode="decimal" value={Number.isNaN(draft.recommendation_thresholds[level]) ? "" : String(draft.recommendation_thresholds[level])} onChange={(event) => setDraft({ ...draft, recommendation_thresholds: { ...draft.recommendation_thresholds, [level]: event.target.value === "" ? Number.NaN : Number(event.target.value) } })} /></label>)}</div></section>
+      <details className="editor-section threshold-panel"><summary><span><strong>推荐阈值</strong><small>{recommendationLevels.map((level) => draft.recommendation_thresholds[level]).join(" / ")}</small></span><SlidersHorizontal size={14} aria-hidden="true" /></summary><div className="field-grid">{recommendationLevels.map((level) => <label key={level}>{levelLabels[level]}<input aria-label={`${levelLabels[level]}阈值`} inputMode="decimal" value={Number.isNaN(draft.recommendation_thresholds[level]) ? "" : String(draft.recommendation_thresholds[level])} onChange={(event) => setDraft({ ...draft, recommendation_thresholds: { ...draft.recommendation_thresholds, [level]: event.target.value === "" ? Number.NaN : Number(event.target.value) } })} /></label>)}</div></details>
 
       {error && <p className="form-message form-message--error" role="alert">{error}</p>}
       {status && <p className="form-message" role="status">{status}</p>}

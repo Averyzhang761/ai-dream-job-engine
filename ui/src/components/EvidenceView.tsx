@@ -149,7 +149,7 @@ export function EvidenceView({
       await bridge.sendMessage(
         `${regenerate ? "请重新生成" : "请生成"} Agent Memory 候选证据预览。仅使用我授权的范围：${selectedScope.join("、")}。不要直接写入 Candidate Profile；请调用 preview_agent_memory_import，然后用 open_claim_review 打开逐条确认界面。`,
       );
-      setMessage("已请求 Agent 生成预览；收到候选信息后仍需逐条确认。");
+      setMessage("请求已发送到当前对话。Agent 生成候选后会打开逐条确认；确认前不会写入个人证据。");
     } catch {
       setError("Agent 未接受请求，请稍后重试");
     } finally {
@@ -253,12 +253,13 @@ export function EvidenceView({
       </div>
 
       <section className="memory-sync" aria-labelledby="memory-sync-heading">
-        <div className="section-heading"><h3 id="memory-sync-heading">Agent Memory</h3><span>默认关闭</span></div>
-        <p>只请求所选范围的候选信息。Agent 不能直接修改你的证据。</p>
+        <div className="section-heading"><h3 id="memory-sync-heading">Agent Memory</h3><span>按需导入</span></div>
+        <p>这里不会直接读取全部记忆。选择范围后，由当前 Agent 生成候选，你再逐条确认。</p>
+        <ol className="memory-steps" aria-label="Agent Memory 导入步骤"><li>选择范围</li><li>Agent 生成候选</li><li>逐条确认</li></ol>
         <div className="scope-options">
           {scopeOptions.map((scope) => <label className="checkbox-field" key={scope}><input type="checkbox" checked={scopes.includes(scope)} onChange={(event) => setScopes(event.target.checked ? [...scopes, scope] : scopes.filter((item) => item !== scope))} />{scope}</label>)}
         </div>
-        <button className="secondary-button" type="button" disabled={busy || scopes.length === 0} onClick={() => askAgent(false)}><Brain size={15} aria-hidden="true" />同步 Agent Memory</button>
+        <button className="secondary-button" type="button" disabled={busy || scopes.length === 0} onClick={() => askAgent(false)}><Brain size={15} aria-hidden="true" />让 Agent 生成候选</button>
         {memorySources.length > 0 && <div className="memory-sources"><strong>已确认来源</strong>{memorySources.map((source) => <button type="button" key={source} onClick={() => { setDisconnectSource(source); setDisconnectMode("preserve"); setDeleteConfirmed(false); }}><Link2Off size={14} aria-hidden="true" />断开 {source}</button>)}</div>}
         {disconnectSource && <fieldset className="disconnect-panel"><legend>断开 {disconnectSource}</legend><label><input type="radio" name="disconnect-mode" checked={disconnectMode === "preserve"} onChange={() => { setDisconnectMode("preserve"); setDeleteConfirmed(false); }} />保留已导入证据</label><label className="destructive-choice"><input type="radio" name="disconnect-mode" checked={disconnectMode === "delete"} onChange={() => setDisconnectMode("delete")} />删除此来源导入的证据</label>{disconnectMode === "delete" && <label className="destructive-confirm"><input type="checkbox" checked={deleteConfirmed} onChange={(event) => setDeleteConfirmed(event.target.checked)} />我确认删除 {disconnectSource} 导入的证据</label>}<div className="disconnect-actions"><button type="button" onClick={() => setDisconnectSource(null)}>取消</button><button className={disconnectMode === "delete" ? "danger-button" : "secondary-button"} type="button" disabled={busy || (disconnectMode === "delete" && !deleteConfirmed)} onClick={disconnectMemory}>{disconnectMode === "delete" ? "确认删除并断开" : "确认断开"}</button></div></fieldset>}
       </section>
