@@ -577,6 +577,8 @@ class LocalRubricApplication:
 class ConfiguredAnalysisApplication:
     def __init__(self, store) -> None:
         self._store = store
+        self._recompute_locks = {}
+        self._recompute_locks_guard = Lock()
 
     def analyze_job(self, job_description: str) -> AnalysisRecord:
         try:
@@ -594,7 +596,10 @@ class ConfiguredAnalysisApplication:
         return self._service(facts, signals).analyze_job(job_description)
 
     def recompute_decision(self, analysis_id: str) -> AnalysisRecord:
-        return self._service().recompute_decision(analysis_id)
+        with self._recompute_locks_guard:
+            lock = self._recompute_locks.setdefault(analysis_id, Lock())
+        with lock:
+            return self._service().recompute_decision(analysis_id)
 
     def get_decision_trace(self, analysis_id: str) -> DecisionTrace:
         return self._service().get_decision_trace(analysis_id)

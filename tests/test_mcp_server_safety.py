@@ -21,6 +21,8 @@ from ai_dream_job_engine.models import (
     CandidateProfile,
     ClaimDecision,
     ClaimSource,
+    JobReviewRecord,
+    JobReviewStatus,
     Rubric,
     RubricPatch,
 )
@@ -400,6 +402,58 @@ def test_rubric_read_transform_save_operations_are_serialized() -> None:
     names = {fact.id: fact.name for fact in store.rubric.facts}
     assert names["role_family"] == "Role family updated"
     assert names["ai_scope"] == "AI scope updated"
+
+
+def test_same_analysis_recomputes_serialize_revisions_and_stale_readiness() -> None:
+    class CoordinatedRecomputeService:
+        def __init__(self) -> None:
+            self.revision = 1
+            self.review = None
+            self.call_count = 0
+            self.state_lock = threading.Lock()
+            self.second_read = threading.Event()
+            self.ready_saved = threading.Event()
+
+        def recompute_decision(self, analysis_id):
+            with self.state_lock:
+                call_index = self.call_count
+                self.call_count += 1
+                observed_revision = self.revision
+
+            if call_index == 0:
+                self.second_read.wait(0.2)
+                with self.state_lock:
+                    self.revision = observed_revision + 1
+                    self.review = JobReviewRecord(
+                        analysis_id=analysis_id,
+                        status=JobReviewStatus.READY_TO_APPLY,
+                        decision_revision=self.revision,
+                    )
+                self.ready_saved.set()
+            else:
+                self.second_read.set()
+                assert self.ready_saved.wait(2)
+                with self.state_lock:
+                    self.revision = observed_revision + 1
+
+            return observed_revision + 1
+
+    service = CoordinatedRecomputeService()
+    application = ConfiguredAnalysisApplication(MemoryStore())
+    application._service = lambda: service
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        revisions = list(
+            executor.map(
+                application.recompute_decision,
+                ["analysis-1", "analysis-1"],
+            )
+        )
+
+    assert sorted(revisions) == [2, 3]
+    assert service.revision == 3
+    assert service.review.decision_revision == 2
+    assert service.review.decision_revision != service.revision
 
 
 @pytest.mark.asyncio
