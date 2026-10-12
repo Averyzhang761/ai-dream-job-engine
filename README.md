@@ -15,6 +15,7 @@ Recommendations are traceable to versioned rubric inputs and evidence references
 - **Local core:** Pydantic domain contracts, deterministic decision logic, and a local SQLite store.
 - **Provider adapters:** OpenAI-compatible extraction and judgment adapters, plus JEV support.
 - **Agent-native plugin:** a Codex plugin and MCP server expose the core's bounded workflows. The host Agent owns schedules and notifications; a `no_change` result is quiet.
+- **MCP App:** a compact side panel for reviewing jobs, editing the rubric, and confirming candidate evidence. Python remains the only owner of persisted state and decisions.
 
 There is no standalone cloud account or application service.
 
@@ -26,8 +27,15 @@ Python 3.12 or 3.13 is required.
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -e '.[dev]'
-pytest
+npm ci
+npm run ui:check
+npm run ui:build
+python -m pytest -q
 ```
+
+`npm run ui:build` writes the single self-contained MCP App document to
+`src/ai_dream_job_engine/ui/workspace-v1.html`. Rebuild it before packaging
+the Python distribution.
 
 Start the local MCP server with:
 
@@ -40,6 +48,25 @@ The helper script requires [`uv`](https://docs.astral.sh/uv/). A clean environme
 ```bash
 python -m ai_dream_job_engine.mcp_server
 ```
+
+### Local Codex setup
+
+The repository contains `.codex-plugin/plugin.json` and `.mcp.json`. For local
+development, open this repository as the Codex project after completing the
+build above. The project MCP configuration starts `./scripts/start-mcp.sh` from
+the repository root. Start a new Codex conversation after enabling or changing
+the plugin so its skill and MCP tools are reloaded.
+
+For a packaged install, publish or add the repository through a Codex plugin
+marketplace, then install `ai-dream-job-engine` from that marketplace with
+`codex plugin add`. The current repository is not yet listed in a public
+marketplace, so there is intentionally no public install selector to copy.
+
+To verify the server independently of Codex, run `./scripts/start-mcp.sh` with
+an MCP Inspector or client. The render entrypoint is `open_job_workspace`; its
+resource is `ui://ai-dream-job-engine/workspace-v1.html` with media type
+`text/html;profile=mcp-app`. Existing non-UI tools remain callable when a host
+cannot render MCP Apps.
 
 ## Model configuration
 
@@ -55,7 +82,13 @@ Agent memory is never silently imported. The user previews proposed claims, choo
 
 1. Create or review the local candidate profile and rubric.
 2. Submit one public job description through the host Agent's `analyze_job` tool.
-3. Review the recommendation, gaps, evidence references, and disclosure record before acting.
+3. Ask the Agent to open the job workspace, then review the recommendation, leading gap, evidence references, and disclosure record.
+4. Choose `Keep`, `Ignore`, or, only when the server allows it, `Ready to apply`.
+
+`ready_to_apply` is a local review state. It never opens a browser, signs in,
+fills a form, or submits an application. Browser login handoff, automatic job
+search, Gmail synchronization, form filling, and application submission remain
+deferred and require separate consent-preserving designs.
 
 For a network-free harness smoke test, run:
 
@@ -91,7 +124,7 @@ These are descriptive review signals, not statistical accuracy estimates. The co
 
 The current implementation analyzes user-supplied job text with a local core and Agent-native plugin. Model outputs can be incomplete or wrong, evidence references still require human review, and the synthetic fixture cannot establish real-world usefulness. Evaluation runtime is machine execution time; review time is accepted only from explicit human post-review input. Neither is a controlled usability study.
 
-Not implemented: job search, Gmail sync, application generation or auto-apply, application submission, cloud accounts, paid tiers, telemetry, a hosted service, or website, desktop, browser, or MCP App UI.
+Not implemented: job search, Gmail sync, application generation or auto-apply, application submission, browser login handoff, cloud accounts, paid tiers, telemetry, a hosted service, or website, desktop, or browser-extension UI.
 
 ## Deferred roadmap
 

@@ -40,3 +40,5 @@ private-data/**/*.xlsx
 private-data/**/*.rtf
 private-data/**/*.txt
 local-mcp-data/
+output/playwright/
+.playwright-cli/
