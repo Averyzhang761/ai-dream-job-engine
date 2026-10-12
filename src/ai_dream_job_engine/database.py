@@ -10,12 +10,18 @@ from typing import TypeVar
 
 from pydantic import BaseModel
 
-from ai_dream_job_engine.models import AnalysisRecord, CandidateProfile, Rubric
+from ai_dream_job_engine.models import (
+    AnalysisRecord,
+    CandidateProfile,
+    JobReviewRecord,
+    Rubric,
+)
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _ACTIVE_ID = "active"
-_TABLES = ("profiles", "rubrics", "analyses")
+_VERSION_ONE_TABLES = ("profiles", "rubrics", "analyses")
+_TABLES = (*_VERSION_ONE_TABLES, "job_reviews")
 _EXPECTED_COLUMNS = [
     ("id", "TEXT", 1, None, 1),
     ("schema_version", "INTEGER", 1, None, 0),
@@ -44,7 +50,7 @@ class LocalStore:
                 current_version = connection.execute(
                     "PRAGMA user_version"
                 ).fetchone()[0]
-                if current_version not in (0, SCHEMA_VERSION):
+                if current_version not in (0, 1, SCHEMA_VERSION):
                     raise ValueError(
                         f"unsupported database version {current_version}; "
                         f"expected {SCHEMA_VERSION}"
@@ -57,17 +63,11 @@ class LocalStore:
                             "version-0 database contains pre-existing objects"
                         )
                     for table in _TABLES:
-                        connection.execute(
-                            f"""
-                            CREATE TABLE {table} (
-                                id TEXT PRIMARY KEY NOT NULL,
-                                schema_version INTEGER NOT NULL,
-                                payload TEXT NOT NULL,
-                                created_at TEXT NOT NULL,
-                                updated_at TEXT NOT NULL
-                            )
-                            """
-                        )
+                        self._create_table(connection, table)
+                    connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+                elif current_version == 1:
+                    self._validate_schema(connection, _VERSION_ONE_TABLES)
+                    self._create_table(connection, "job_reviews")
                     connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
                 self._validate_schema(connection)
@@ -127,6 +127,41 @@ class LocalStore:
             ).fetchall()
         return [
             self._validate_payload("analysis", row, AnalysisRecord) for row in rows
+        ]
+
+    def save_job_review(self, record: JobReviewRecord) -> None:
+        self._save(
+            "job_reviews",
+            record.analysis_id,
+            record,
+            self._utc_timestamp(record.updated_at),
+        )
+
+    def load_job_review(self, analysis_id: str) -> JobReviewRecord | None:
+        with closing(sqlite3.connect(self._path)) as connection:
+            row = connection.execute(
+                """
+                SELECT schema_version, payload
+                FROM job_reviews
+                WHERE id = ?
+                """,
+                (analysis_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._validate_payload("job review", row, JobReviewRecord)
+
+    def list_job_reviews(self) -> list[JobReviewRecord]:
+        with closing(sqlite3.connect(self._path)) as connection:
+            rows = connection.execute(
+                """
+                SELECT schema_version, payload
+                FROM job_reviews
+                ORDER BY updated_at, id
+                """
+            ).fetchall()
+        return [
+            self._validate_payload("job review", row, JobReviewRecord) for row in rows
         ]
 
     def _save_singleton(self, table: str, model: BaseModel) -> None:
@@ -189,13 +224,31 @@ class LocalStore:
             ).fetchall()
         )
 
+    @staticmethod
+    def _create_table(connection: sqlite3.Connection, table: str) -> None:
+        connection.execute(
+            f"""
+            CREATE TABLE {table} (
+                id TEXT PRIMARY KEY NOT NULL,
+                schema_version INTEGER NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+
     @classmethod
-    def _validate_schema(cls, connection: sqlite3.Connection) -> None:
-        expected_objects = {("table", table) for table in _TABLES}
+    def _validate_schema(
+        cls,
+        connection: sqlite3.Connection,
+        tables: tuple[str, ...] = _TABLES,
+    ) -> None:
+        expected_objects = {("table", table) for table in tables}
         if cls._application_objects(connection) != expected_objects:
             raise ValueError("database objects do not match the application schema")
 
-        for table in _TABLES:
+        for table in tables:
             columns = [
                 (row[1], row[2].upper(), row[3], row[4], row[5])
                 for row in connection.execute(f"PRAGMA table_info({table})")
@@ -224,10 +277,10 @@ class LocalStore:
     ) -> _Model:
         schema_version, payload = row
         try:
-            if schema_version != SCHEMA_VERSION:
+            if schema_version not in (1, SCHEMA_VERSION):
                 raise ValueError(
                     f"unsupported payload version {schema_version}; "
-                    f"expected {SCHEMA_VERSION}"
+                    f"expected 1 or {SCHEMA_VERSION}"
                 )
             return model_type.model_validate_json(payload)
         except (TypeError, ValueError) as error:

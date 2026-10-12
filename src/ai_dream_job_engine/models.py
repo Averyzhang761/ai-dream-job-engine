@@ -41,6 +41,13 @@ class RecommendationLevel(StrEnum):
     SKIP = "skip"
 
 
+class JobReviewStatus(StrEnum):
+    UNREVIEWED = "unreviewed"
+    KEPT = "kept"
+    IGNORED = "ignored"
+    READY_TO_APPLY = "ready_to_apply"
+
+
 class SignalStatus(StrEnum):
     AVAILABLE = "available"
     UNAVAILABLE = "unavailable"
@@ -406,6 +413,12 @@ class AnalysisRecord(DomainModel):
     error_category: str | None = None
     error: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class JobReviewRecord(DomainModel):
+    analysis_id: str = Field(min_length=1)
+    status: JobReviewStatus
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class AnalysisSummary(DomainModel):

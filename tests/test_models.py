@@ -13,6 +13,8 @@ from ai_dream_job_engine.models import (
     FactDefinition,
     Gap,
     GapKind,
+    JobReviewRecord,
+    JobReviewStatus,
     RecommendationLevel,
     ValueDimension,
 )
@@ -209,6 +211,20 @@ def test_analysis_record_rejects_negative_latency_ms() -> None:
             status="success",
             latency_ms=-1,
         )
+
+
+def test_job_review_status_has_only_supported_values() -> None:
+    assert {status.value for status in JobReviewStatus} == {
+        "unreviewed",
+        "kept",
+        "ignored",
+        "ready_to_apply",
+    }
+
+
+def test_job_review_record_requires_analysis_id() -> None:
+    with pytest.raises(ValidationError):
+        JobReviewRecord(status=JobReviewStatus.UNREVIEWED)
 
 
 def test_evaluation_case_requires_human_labels_before_system_result() -> None:

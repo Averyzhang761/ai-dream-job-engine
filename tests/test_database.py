@@ -12,6 +12,8 @@ from ai_dream_job_engine.models import (
     ClaimDecision,
     ClaimSource,
     DecisionTrace,
+    JobReviewRecord,
+    JobReviewStatus,
     Rubric,
 )
 from ai_dream_job_engine.profile import confirm_claims, disconnect_memory_source
@@ -62,8 +64,8 @@ def test_initialize_is_idempotent(tmp_path) -> None:
         }
         user_version = connection.execute("PRAGMA user_version").fetchone()[0]
 
-    assert tables == {"profiles", "rubrics", "analyses"}
-    assert user_version == 1
+    assert tables == {"profiles", "rubrics", "analyses", "job_reviews"}
+    assert user_version == 2
 
 
 def test_profile_round_trip_preserves_claim_sources(tmp_path) -> None:
@@ -124,6 +126,101 @@ def test_rubric_round_trip_preserves_version(tmp_path) -> None:
     loaded = store.load_rubric()
     assert loaded == rubric
     assert loaded.version == "ai-job-v7"
+
+
+def test_version_one_database_migrates_to_review_state_schema(tmp_path) -> None:
+    database_path = tmp_path / "store.sqlite3"
+    profile = CandidateProfile()
+    rubric = Rubric(version="ai-job-v1")
+    analysis = _analysis("analysis-1", datetime(2026, 1, 1, tzinfo=timezone.utc))
+    created_at = "2026-01-01T00:00:00+00:00"
+    with sqlite3.connect(database_path) as connection:
+        _create_version_one_schema(connection)
+        connection.execute(
+            "INSERT INTO profiles VALUES (?, ?, ?, ?, ?)",
+            ("active", 1, profile.model_dump_json(), created_at, created_at),
+        )
+        connection.execute(
+            "INSERT INTO rubrics VALUES (?, ?, ?, ?, ?)",
+            ("active", 1, rubric.model_dump_json(), created_at, created_at),
+        )
+        connection.execute(
+            "INSERT INTO analyses VALUES (?, ?, ?, ?, ?)",
+            (analysis.id, 1, analysis.model_dump_json(), created_at, created_at),
+        )
+
+    store = LocalStore.open(database_path)
+    store.initialize()
+
+    with sqlite3.connect(database_path) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        user_version = connection.execute("PRAGMA user_version").fetchone()[0]
+        preserved_versions = {
+            table: connection.execute(
+                f"SELECT schema_version FROM {table}"
+            ).fetchone()[0]
+            for table in ("profiles", "rubrics", "analyses")
+        }
+
+    assert tables == {"profiles", "rubrics", "analyses", "job_reviews"}
+    assert user_version == 2
+    assert preserved_versions == {"profiles": 1, "rubrics": 1, "analyses": 1}
+    assert store.load_profile() == profile
+    assert store.load_rubric() == rubric
+    assert store.list_analyses() == [analysis]
+
+
+def test_job_review_round_trip(tmp_path) -> None:
+    store = LocalStore.open(tmp_path / "store.sqlite3")
+    store.initialize()
+    review = JobReviewRecord(
+        analysis_id="analysis-1",
+        status=JobReviewStatus.KEPT,
+        updated_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+
+    store.save_job_review(review)
+
+    assert store.load_job_review("analysis-1") == review
+    assert store.list_job_reviews() == [review]
+
+
+def test_job_review_upsert_preserves_one_row_per_analysis(tmp_path) -> None:
+    store = LocalStore.open(tmp_path / "store.sqlite3")
+    store.initialize()
+    original = JobReviewRecord(
+        analysis_id="analysis-1",
+        status=JobReviewStatus.KEPT,
+        updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    replacement = JobReviewRecord(
+        analysis_id="analysis-1",
+        status=JobReviewStatus.READY_TO_APPLY,
+        updated_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+
+    store.save_job_review(original)
+    store.save_job_review(replacement)
+
+    assert store.list_job_reviews() == [replacement]
+
+
+def test_review_state_schema_rejects_unexpected_objects(tmp_path) -> None:
+    database_path = tmp_path / "store.sqlite3"
+    store = LocalStore.open(database_path)
+    store.initialize()
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("CREATE TABLE unrelated (value TEXT)")
+
+    with pytest.raises(StoreError) as exc_info:
+        store.initialize()
+
+    assert exc_info.value.__cause__ is not None
 
 
 def test_analysis_round_trip_preserves_decision_trace(tmp_path) -> None:
@@ -219,7 +316,7 @@ def test_malformed_version_one_schema_is_rejected_without_mutation(tmp_path) -> 
     assert payload_column[3] == 0
 
 
-def test_version_one_with_extra_table_is_rejected_without_mutation(tmp_path) -> None:
+def test_current_version_with_extra_table_is_rejected_without_mutation(tmp_path) -> None:
     database_path = tmp_path / "store.sqlite3"
     store = LocalStore.open(database_path)
     store.initialize()
@@ -237,13 +334,19 @@ def test_version_one_with_extra_table_is_rejected_without_mutation(tmp_path) -> 
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
         }
-    assert tables == {"profiles", "rubrics", "analyses", "unrelated"}
+    assert tables == {
+        "profiles",
+        "rubrics",
+        "analyses",
+        "job_reviews",
+        "unrelated",
+    }
 
 
 def test_unsupported_database_version_is_rejected(tmp_path) -> None:
     database_path = tmp_path / "store.sqlite3"
     with sqlite3.connect(database_path) as connection:
-        connection.execute("PRAGMA user_version = 2")
+        connection.execute("PRAGMA user_version = 3")
 
     with pytest.raises(StoreError) as exc_info:
         LocalStore.open(database_path).initialize()
@@ -334,7 +437,7 @@ def test_connections_close_on_success_and_exception(tmp_path, monkeypatch) -> No
     store.initialize()
     real_connect = sqlite3.connect
     with real_connect(unsupported_path) as connection:
-        connection.execute("PRAGMA user_version = 2")
+        connection.execute("PRAGMA user_version = 3")
     tracked_connections = []
 
     class TrackingConnection(sqlite3.Connection):
