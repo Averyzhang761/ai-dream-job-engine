@@ -428,6 +428,53 @@ class JobReviewRecord(DomainModel):
         return value.astimezone(timezone.utc)
 
 
+class ActiveRubricMetadata(DomainModel):
+    id: str = Field(min_length=1)
+    version: str = Field(min_length=1)
+    revision: str
+
+
+class WorkspaceJobSummary(DomainModel):
+    analysis_id: str = Field(min_length=1)
+    title: str | None = None
+    company: str | None = None
+    recommendation: RecommendationLevel
+    preference_score: float | None = Field(default=None, ge=0, le=1)
+    qualification_score: float | None = Field(default=None, ge=0, le=1)
+    top_unresolved_gap: Gap | None = None
+    review_status: JobReviewStatus = JobReviewStatus.UNREVIEWED
+    created_at: datetime
+    can_mark_ready_to_apply: bool
+
+
+class WorkspaceJobDetail(DomainModel):
+    summary: WorkspaceJobSummary
+    gaps: dict[GapKind, list[Gap]]
+    preference_contributions: list[DecisionContribution]
+    qualification_contributions: list[DecisionContribution]
+    trace_evidence: list[str]
+
+
+class WorkspaceSnapshot(DomainModel):
+    profile_ready: bool
+    rubric_ready: bool
+    setup_actions: list[Literal["initialize_profile", "initialize_rubric"]]
+    active_rubric: ActiveRubricMetadata | None = None
+    confirmed_claims: list[CandidateClaim]
+    jobs: list[WorkspaceJobSummary]
+
+
+class ClaimPreviewView(DomainModel):
+    preview_id: str = Field(min_length=32)
+    kind: Literal["profile_claims", "agent_memory"]
+    candidates: list[CandidateClaim]
+    source_agent: str | None = None
+    scope: list[str] = Field(default_factory=list)
+    added_claim_ids: list[str] = Field(default_factory=list)
+    changed_claim_ids: list[str] = Field(default_factory=list)
+    conflicting_claim_ids: list[str] = Field(default_factory=list)
+
+
 class AnalysisSummary(DomainModel):
     analysis_id: str = Field(min_length=1)
     recommendation: RecommendationLevel | None = None

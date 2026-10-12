@@ -7,7 +7,16 @@ import pytest
 from packaging.markers import Marker
 
 from ai_dream_job_engine.mcp_server import MCPServices, build_server
-from ai_dream_job_engine.models import AnalysisRecord, CandidateProfile, Rubric
+from ai_dream_job_engine.models import (
+    AnalysisRecord,
+    CandidateClaim,
+    CandidateProfile,
+    ClaimPreviewView,
+    ClaimSource,
+    JobReviewStatus,
+    Rubric,
+    WorkspaceSnapshot,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +33,11 @@ EXPECTED_TOOLS = {
     "recompute_decision",
     "get_decision_trace",
     "list_analyzed_jobs",
+    "get_workspace_snapshot",
+    "get_workspace_job",
+    "set_job_review_status",
+    "get_candidate_profile",
+    "get_claim_preview",
 }
 
 
@@ -76,12 +90,48 @@ class FakeAnalysisService:
         return []
 
 
+class FakeWorkspaceService:
+    def get_snapshot(self):
+        return WorkspaceSnapshot(
+            profile_ready=True,
+            rubric_ready=False,
+            setup_actions=["initialize_rubric"],
+            confirmed_claims=[],
+            jobs=[],
+        )
+
+    def get_job_detail(self, analysis_id):
+        raise AssertionError("not used")
+
+    def set_review_status(self, analysis_id, status):
+        raise AssertionError("not used")
+
+    def get_profile(self):
+        return CandidateProfile()
+
+    def get_claim_preview(self, preview_id):
+        return ClaimPreviewView(
+            preview_id=preview_id,
+            kind="profile_claims",
+            candidates=[
+                CandidateClaim(
+                    id="claim-1",
+                    claim_type="python",
+                    value="confirmed only after action",
+                    source=ClaimSource.RESUME_EVIDENCE,
+                    source_quote="Python evidence",
+                )
+            ],
+        )
+
+
 def _server():
     return build_server(
         MCPServices(
             profile=FakeProfileService(),
             rubric=FakeRubricService(),
             analysis=FakeAnalysisService(),
+            workspace=FakeWorkspaceService(),
         )
     )
 
@@ -104,6 +154,25 @@ async def test_tool_schemas_use_domain_contracts() -> None:
     assert "ClaimDecision" in confirm_schema["$defs"]
     assert set(confirm_schema["required"]) == {"preview_id", "decisions"}
     assert "RubricPatch" in rubric_schema["$defs"]
+    review_schema = tools["set_job_review_status"].input_schema
+    assert "JobReviewStatus" in review_schema["$defs"]
+    assert set(review_schema["required"]) == {"analysis_id", "status"}
+
+
+@pytest.mark.asyncio
+async def test_workspace_tools_return_typed_structured_output() -> None:
+    snapshot = await _server().call_tool("get_workspace_snapshot", {})
+    profile = await _server().call_tool("get_candidate_profile", {})
+    preview = await _server().call_tool(
+        "get_claim_preview", {"preview_id": "p" * 32}
+    )
+
+    assert snapshot.is_error is False
+    assert snapshot.structured_content["profile_ready"] is True
+    assert snapshot.structured_content["setup_actions"] == ["initialize_rubric"]
+    assert profile.structured_content["id"] == "default"
+    assert preview.structured_content["kind"] == "profile_claims"
+    assert preview.structured_content["candidates"][0]["id"] == "claim-1"
 
 
 @pytest.mark.asyncio

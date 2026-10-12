@@ -22,11 +22,15 @@ from ai_dream_job_engine.models import (
     AnalysisSummary,
     CandidateClaim,
     CandidateProfile,
+    ClaimPreviewView,
     ClaimDecision,
     DecisionTrace,
+    JobReviewStatus,
     MemoryImportPreview,
     Rubric,
     RubricPatch,
+    WorkspaceJobDetail,
+    WorkspaceSnapshot,
 )
 from ai_dream_job_engine.profile import (
     confirm_claims,
@@ -40,6 +44,7 @@ from ai_dream_job_engine.providers.openai_compatible import (
 )
 from ai_dream_job_engine.rubric import apply_rubric_patch, load_default_rubric
 from ai_dream_job_engine.service import AnalysisServiceError, JobAnalysisService
+from ai_dream_job_engine.workspace import WorkspaceApplication, WorkspaceError
 
 
 NonEmptyString = Annotated[str, Field(min_length=1)]
@@ -51,6 +56,8 @@ _FACT_MODEL_ENV = "AI_DREAM_JOB_FACT_MODEL"
 _OPENAI_KEY_ENV = "OPENAI_API_KEY"
 _OPENROUTER_KEY_ENV = "OPENROUTER_API_KEY"
 _JEV_KEY_ENV = "TYPESAFE_API_KEY"
+_PROFILE_PREVIEW_PREFIX = "profile_"
+_MEMORY_PREVIEW_PREFIX = "memory_"
 APPLICATION_CONFIG_ENV_VARS = frozenset(
     {
         _DATA_PATH_ENV,
@@ -122,6 +129,10 @@ INTERNAL_FAILURE = (
     "internal_failure",
     "The action could not be completed safely; retry it.",
 )
+REVIEW_STATUS_INELIGIBLE = (
+    "review_status_ineligible",
+    "Only priority-apply jobs without hard blockers or unresolved evidence gaps can be ready to apply.",
+)
 
 
 class ApplicationError(RuntimeError):
@@ -157,6 +168,10 @@ class _RegisteredProfilePreview:
 
 
 class ProfileApplication(Protocol):
+    def get_profile(self) -> CandidateProfile: ...
+
+    def get_claim_preview(self, preview_id: str) -> ClaimPreviewView: ...
+
     def initialize_profile(
         self, profile: CandidateProfile | None = None
     ) -> CandidateProfile: ...
@@ -203,11 +218,26 @@ class AnalysisApplication(Protocol):
     def list_analyzed_jobs(self) -> list[AnalysisSummary]: ...
 
 
+class WorkspaceOperations(Protocol):
+    def get_snapshot(self) -> WorkspaceSnapshot: ...
+
+    def get_job_detail(self, analysis_id: str) -> WorkspaceJobDetail: ...
+
+    def set_review_status(
+        self, analysis_id: str, status: JobReviewStatus
+    ) -> WorkspaceJobDetail: ...
+
+    def get_profile(self) -> CandidateProfile: ...
+
+    def get_claim_preview(self, preview_id: str) -> ClaimPreviewView: ...
+
+
 @dataclass(frozen=True)
 class MCPServices:
     profile: ProfileApplication
     rubric: RubricApplication
     analysis: AnalysisApplication
+    workspace: WorkspaceOperations | None = None
 
 
 class _LazyLocalStore:
@@ -249,6 +279,15 @@ class _LazyLocalStore:
     def list_analyses(self) -> list[AnalysisRecord]:
         return self._ready().list_analyses()
 
+    def save_job_review(self, record) -> None:
+        self._ready().save_job_review(record)
+
+    def load_job_review(self, analysis_id: str):
+        return self._ready().load_job_review(analysis_id)
+
+    def list_job_reviews(self):
+        return self._ready().list_job_reviews()
+
 
 class LocalProfileApplication:
     def __init__(self, store) -> None:
@@ -272,6 +311,66 @@ class LocalProfileApplication:
             self._profile_previews.clear()
             return empty
 
+    def get_profile(self) -> CandidateProfile:
+        with self._lock:
+            return self._profile().model_copy(deep=True)
+
+    def get_claim_preview(self, preview_id: str) -> ClaimPreviewView:
+        with self._lock:
+            profile = self._profile()
+            profile_preview = self._profile_previews.get(preview_id)
+            if profile_preview is not None:
+                if (
+                    _model_digest(profile) != profile_preview.profile_digest
+                    or _profile_preview_digest(profile, profile_preview.candidates)
+                    != profile_preview.binding_digest
+                ):
+                    raise ApplicationError(PROFILE_PREVIEW_INVALID)
+                return ClaimPreviewView(
+                    preview_id=preview_id,
+                    kind="profile_claims",
+                    candidates=[
+                        item.model_copy(deep=True)
+                        for item in profile_preview.candidates
+                    ],
+                )
+
+            memory_preview = self._previews.get(preview_id)
+            if memory_preview is None:
+                error = (
+                    MEMORY_PREVIEW_INVALID
+                    if preview_id.startswith(_MEMORY_PREVIEW_PREFIX)
+                    else PROFILE_PREVIEW_INVALID
+                )
+                raise ApplicationError(error)
+            if _model_digest(profile) != memory_preview.profile_digest:
+                raise ApplicationError(MEMORY_PREVIEW_INVALID)
+            try:
+                reproduced = preview_memory_import(
+                    profile,
+                    memory_preview.preview.source_agent,
+                    memory_preview.preview.scope,
+                    memory_preview.preview.candidates,
+                )
+            except ValueError:
+                raise ApplicationError(MEMORY_PREVIEW_INVALID) from None
+            if (
+                _preview_binding_digest(profile, reproduced)
+                != memory_preview.binding_digest
+            ):
+                raise ApplicationError(MEMORY_PREVIEW_INVALID)
+            preview = memory_preview.preview
+            return ClaimPreviewView(
+                preview_id=preview_id,
+                kind="agent_memory",
+                candidates=[item.model_copy(deep=True) for item in preview.candidates],
+                source_agent=preview.source_agent,
+                scope=list(preview.scope),
+                added_claim_ids=list(preview.added_claim_ids),
+                changed_claim_ids=list(preview.changed_claim_ids),
+                conflicting_claim_ids=list(preview.conflicting_claim_ids),
+            )
+
     def review_profile_claims(
         self, proposals: list[CandidateClaim]
     ) -> IssuedProfileClaimsPreview:
@@ -281,7 +380,7 @@ class LocalProfileApplication:
                 _validate_resume_proposals(proposals)
             except ValueError:
                 raise ApplicationError(PROFILE_PREVIEW_INVALID) from None
-            preview_id = self._new_preview_id()
+            preview_id = self._new_preview_id(_PROFILE_PREVIEW_PREFIX)
             candidates = tuple(item.model_copy(deep=True) for item in proposals)
             self._profile_previews[preview_id] = _RegisteredProfilePreview(
                 profile_digest=_model_digest(profile),
@@ -352,7 +451,7 @@ class LocalProfileApplication:
                 )
             except ValueError:
                 raise ApplicationError(MEMORY_PREVIEW_INVALID) from None
-            preview_id = self._new_preview_id()
+            preview_id = self._new_preview_id(_MEMORY_PREVIEW_PREFIX)
             registered_preview = preview.model_copy(deep=True)
             self._previews[preview_id] = _RegisteredPreview(
                 profile_digest=_model_digest(profile),
@@ -430,10 +529,13 @@ class LocalProfileApplication:
         except Exception:
             raise ApplicationError(STORAGE_FAILURE) from None
 
-    def _new_preview_id(self) -> str:
+    def _new_preview_id(self, prefix: str) -> str:
         while True:
-            preview_id = secrets.token_urlsafe(32)
-            if preview_id not in self._previews:
+            preview_id = f"{prefix}{secrets.token_urlsafe(32)}"
+            if (
+                preview_id not in self._previews
+                and preview_id not in self._profile_previews
+            ):
                 return preview_id
 
 
@@ -609,10 +711,18 @@ def _default_database_path() -> Path:
 
 def default_services() -> MCPServices:
     store = _LazyLocalStore(_default_database_path)
+    profile = LocalProfileApplication(store)
+    rubric = LocalRubricApplication(store)
+    analysis = ConfiguredAnalysisApplication(store)
     return MCPServices(
-        profile=LocalProfileApplication(store),
-        rubric=LocalRubricApplication(store),
-        analysis=ConfiguredAnalysisApplication(store),
+        profile=profile,
+        rubric=rubric,
+        analysis=analysis,
+        workspace=WorkspaceApplication(
+            store,
+            profile_application=profile,
+            analysis_application=analysis,
+        ),
     )
 
 
@@ -641,6 +751,18 @@ def _analysis_public_error(error: AnalysisServiceError) -> tuple[str, str]:
     return ANALYSIS_FAILURE
 
 
+def _workspace_public_error(error: WorkspaceError) -> tuple[str, str]:
+    if error.code == "analysis_not_found":
+        return ANALYSIS_NOT_FOUND
+    if error.code == "analysis_unavailable":
+        return ANALYSIS_UNAVAILABLE
+    if error.code == "storage_failure":
+        return STORAGE_FAILURE
+    if error.code == "review_status_ineligible":
+        return REVIEW_STATUS_INELIGIBLE
+    return INTERNAL_FAILURE
+
+
 def _call_safely(operation):
     try:
         return operation()
@@ -648,6 +770,11 @@ def _call_safely(operation):
         raise ToolError(str(error)) from None
     except AnalysisServiceError as error:
         public_error = _analysis_public_error(error)
+        raise ToolError(
+            f"{public_error[0]}: {public_error[1]}"
+        ) from None
+    except WorkspaceError as error:
+        public_error = _workspace_public_error(error)
         raise ToolError(
             f"{public_error[0]}: {public_error[1]}"
         ) from None
@@ -770,6 +897,42 @@ def build_server(services: MCPServices | None = None) -> MCPServer:
     def list_analyzed_jobs() -> list[AnalysisSummary]:
         """List structured summaries of successful local analyses."""
         return _call_safely(applications.analysis.list_analyzed_jobs)
+
+    @server.tool()
+    def get_workspace_snapshot() -> WorkspaceSnapshot:
+        """Return setup state, confirmed claims, and reviewed job summaries."""
+        return _call_safely(
+            lambda: applications.workspace.get_snapshot()
+        )
+
+    @server.tool()
+    def get_workspace_job(analysis_id: NonEmptyString) -> WorkspaceJobDetail:
+        """Return one integrity-valid decision with grouped gaps and evidence."""
+        return _call_safely(
+            lambda: applications.workspace.get_job_detail(analysis_id)
+        )
+
+    @server.tool()
+    def set_job_review_status(
+        analysis_id: NonEmptyString,
+        status: JobReviewStatus,
+    ) -> WorkspaceJobDetail:
+        """Persist an explicit review status after server-side eligibility checks."""
+        return _call_safely(
+            lambda: applications.workspace.set_review_status(analysis_id, status)
+        )
+
+    @server.tool()
+    def get_candidate_profile() -> CandidateProfile:
+        """Return the active local candidate profile."""
+        return _call_safely(applications.workspace.get_profile)
+
+    @server.tool()
+    def get_claim_preview(preview_id: NonEmptyString) -> ClaimPreviewView:
+        """Return an immutable view of a server-issued claim preview."""
+        return _call_safely(
+            lambda: applications.workspace.get_claim_preview(preview_id)
+        )
 
     return server
 

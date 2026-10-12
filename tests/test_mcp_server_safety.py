@@ -26,6 +26,10 @@ from ai_dream_job_engine.models import (
 )
 from ai_dream_job_engine.rubric import load_default_rubric
 from ai_dream_job_engine.service import AnalysisServiceError
+from ai_dream_job_engine.workspace import (
+    STORAGE_FAILURE as WORKSPACE_STORAGE_FAILURE,
+    WorkspaceError,
+)
 
 
 class MemoryStore:
@@ -422,7 +426,33 @@ async def test_server_construction_and_listing_do_not_read_application_config(
 
     tools = await build_server().list_tools()
 
-    assert len(tools) == 12
+    assert len(tools) == 17
+
+
+@pytest.mark.asyncio
+async def test_workspace_errors_reuse_fixed_public_recovery_messages() -> None:
+    class FailingWorkspaceService:
+        def get_snapshot(self):
+            raise WorkspaceError(WORKSPACE_STORAGE_FAILURE)
+
+    server = build_server(
+        MCPServices(
+            profile=LocalProfileApplication(
+                MemoryStore(profile=CandidateProfile())
+            ),
+            rubric=StaticRubricService(),
+            analysis=StaticAnalysisService(),
+            workspace=FailingWorkspaceService(),
+        )
+    )
+
+    with pytest.raises(ToolError) as raised:
+        await server.call_tool("get_workspace_snapshot", {})
+
+    assert (
+        "storage_failure: Local data could not be saved or loaded; retry the action."
+        in str(raised.value)
+    )
 
 
 @pytest.mark.asyncio
