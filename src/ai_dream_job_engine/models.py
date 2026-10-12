@@ -449,12 +449,23 @@ class WorkspaceJobSummary(DomainModel):
     can_mark_ready_to_apply: bool
 
 
+class ReadyToApplyBlocker(DomainModel):
+    code: Literal[
+        "recommendation_not_priority",
+        "hard_blocker",
+        "unresolved_evidence_gap",
+    ]
+    message: str = Field(min_length=1)
+    subject_ids: list[str] = Field(default_factory=list)
+
+
 class WorkspaceJobDetail(DomainModel):
     summary: WorkspaceJobSummary
     gaps: dict[GapKind, list[Gap]]
     preference_contributions: list[DecisionContribution]
     qualification_contributions: list[DecisionContribution]
     trace_evidence: list[str]
+    ready_to_apply_blockers: list[ReadyToApplyBlocker] = Field(default_factory=list)
 
 
 class WorkspaceSnapshot(DomainModel):

@@ -236,14 +236,20 @@ function JobWorkspace({
   const [loadingDetail, setLoadingDetail] = useState(Boolean(selectedId));
   const [busy, setBusy] = useState(false);
   const [announcement, setAnnouncement] = useState("");
+  const [detailLoadFailed, setDetailLoadFailed] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const selectedIdRef = useRef(selectedId);
 
   useEffect(() => {
     setJobs(initialJobs);
-    setSelectedId((current) =>
-      current && initialJobs.some((job) => job.analysis_id === current)
-        ? current
-        : initialJobs[0]?.analysis_id ?? null,
-    );
+    setSelectedId((current) => {
+      const next =
+        current && initialJobs.some((job) => job.analysis_id === current)
+          ? current
+          : initialJobs[0]?.analysis_id ?? null;
+      selectedIdRef.current = next;
+      return next;
+    });
   }, [initialJobs]);
 
   useEffect(() => {
@@ -253,17 +259,26 @@ function JobWorkspace({
       return;
     }
     let cancelled = false;
+    const requestedId = selectedId;
     setLoadingDetail(true);
+    setDetailLoadFailed(false);
     bridge
       .callTool<WorkspaceJobDetail>("get_workspace_job", {
         analysis_id: selectedId,
       })
       .then((nextDetail) => {
-        if (!cancelled) setDetail(nextDetail);
+        if (
+          !cancelled &&
+          nextDetail.summary.analysis_id === requestedId &&
+          selectedIdRef.current === requestedId
+        ) {
+          setDetail(nextDetail);
+        }
       })
       .catch(() => {
-        if (!cancelled) {
+        if (!cancelled && selectedIdRef.current === requestedId) {
           setDetail(null);
+          setDetailLoadFailed(true);
           setAnnouncement("无法载入岗位详情；请重试");
         }
       })
@@ -273,10 +288,13 @@ function JobWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [bridge, selectedId]);
+  }, [bridge, loadAttempt, selectedId]);
 
-  const replaceFromServer = (nextDetail: WorkspaceJobDetail) => {
-    setDetail(nextDetail);
+  const replaceFromServer = (
+    requestedId: string,
+    nextDetail: WorkspaceJobDetail,
+  ) => {
+    if (nextDetail.summary.analysis_id !== requestedId) return false;
     setJobs((current) =>
       current.map((job) =>
         job.analysis_id === nextDetail.summary.analysis_id
@@ -284,49 +302,67 @@ function JobWorkspace({
           : job,
       ),
     );
+    if (selectedIdRef.current === requestedId) {
+      setDetail(nextDetail);
+    }
+    return true;
   };
 
-  const refreshSelected = async () => {
-    if (!selectedId) return false;
+  const refreshJob = async (analysisId: string) => {
     try {
       const refreshed = await bridge.callTool<WorkspaceJobDetail>(
         "get_workspace_job",
-        { analysis_id: selectedId },
+        { analysis_id: analysisId },
       );
-      replaceFromServer(refreshed);
-      return true;
+      return replaceFromServer(analysisId, refreshed);
     } catch {
       return false;
     }
   };
 
   const review = async (status: JobReviewStatus) => {
-    if (!selectedId || busy) return;
+    const actionAnalysisId = detail?.summary.analysis_id;
+    if (
+      !actionAnalysisId ||
+      selectedIdRef.current !== actionAnalysisId ||
+      busy
+    ) return;
     setBusy(true);
     setAnnouncement("");
     try {
       const nextDetail = await bridge.callTool<WorkspaceJobDetail>(
         "set_job_review_status",
-        { analysis_id: selectedId, status },
+        { analysis_id: actionAnalysisId, status },
       );
-      replaceFromServer(nextDetail);
-      setAnnouncement(
-        status === "kept"
-          ? "已保留此岗位"
-          : status === "ignored"
-            ? "已忽略此岗位"
-            : "已加入待申请队列",
-      );
+      const accepted = replaceFromServer(actionAnalysisId, nextDetail);
+      if (accepted && selectedIdRef.current === actionAnalysisId) {
+        setAnnouncement(
+          status === "kept"
+            ? "已保留此岗位"
+            : status === "ignored"
+              ? "已忽略此岗位"
+              : "已加入待申请队列",
+        );
+      }
     } catch {
-      const refreshed = await refreshSelected();
-      setAnnouncement(
-        refreshed
-          ? "状态未更新；已刷新服务端结果"
-          : "状态未更新；请重试",
-      );
+      const refreshed = await refreshJob(actionAnalysisId);
+      if (selectedIdRef.current === actionAnalysisId) {
+        setAnnouncement(
+          refreshed
+            ? "状态未更新；已刷新服务端结果"
+            : "状态未更新；请重试",
+        );
+      }
     } finally {
       setBusy(false);
     }
+  };
+
+  const selectJob = (analysisId: string) => {
+    selectedIdRef.current = analysisId;
+    setSelectedId(analysisId);
+    setDetail(null);
+    setAnnouncement("");
   };
 
   if (jobs.length === 0) {
@@ -340,11 +376,24 @@ function JobWorkspace({
           <h2>岗位</h2>
           <span>{jobs.length}</span>
         </div>
-        <JobList jobs={jobs} selectedId={selectedId} onSelect={setSelectedId} />
+        <JobList jobs={jobs} selectedId={selectedId} onSelect={selectJob} />
       </aside>
       <div className="job-detail-region">
         {loadingDetail ? (
           <div className="state-message">正在载入岗位判断…</div>
+        ) : detailLoadFailed ? (
+          <div className="state-message detail-error">
+            <p>无法载入岗位详情</p>
+            <button
+              type="button"
+              onClick={() => {
+                setAnnouncement("");
+                setLoadAttempt((current) => current + 1);
+              }}
+            >
+              重试载入详情
+            </button>
+          </div>
         ) : detail ? (
           <JobDetail detail={detail} busy={busy} onReview={review} />
         ) : (

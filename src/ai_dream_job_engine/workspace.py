@@ -14,6 +14,7 @@ from ai_dream_job_engine.models import (
     JobReviewRecord,
     JobReviewStatus,
     RecommendationLevel,
+    ReadyToApplyBlocker,
     WorkspaceJobDetail,
     WorkspaceJobSummary,
     WorkspaceSnapshot,
@@ -143,6 +144,7 @@ class WorkspaceApplication:
                 item.model_copy(deep=True) for item in result.qualification_contributions
             ],
             trace_evidence=list(trace.evidence),
+            ready_to_apply_blockers=_ready_to_apply_blockers(record),
         )
 
     def set_review_status(
@@ -233,15 +235,47 @@ class WorkspaceApplication:
 
 
 def _can_mark_ready_to_apply(record: AnalysisRecord) -> bool:
+    return not _ready_to_apply_blockers(record)
+
+
+def _ready_to_apply_blockers(record: AnalysisRecord) -> list[ReadyToApplyBlocker]:
     result = record.result
-    return bool(
-        result is not None
-        and result.recommendation is RecommendationLevel.PRIORITY_APPLY
-        and not any(
-            gap.kind in {GapKind.HARD_BLOCKER, GapKind.EVIDENCE_GAP}
-            for gap in result.gaps
+    if result is None:
+        raise WorkspaceError(ANALYSIS_UNAVAILABLE)
+
+    blockers: list[ReadyToApplyBlocker] = []
+    if result.recommendation is not RecommendationLevel.PRIORITY_APPLY:
+        blockers.append(
+            ReadyToApplyBlocker(
+                code="recommendation_not_priority",
+                message="推荐等级不是优先申请",
+            )
         )
-    )
+
+    hard_blocker_ids = [
+        gap.subject_id for gap in result.gaps if gap.kind is GapKind.HARD_BLOCKER
+    ]
+    if hard_blocker_ids:
+        blockers.append(
+            ReadyToApplyBlocker(
+                code="hard_blocker",
+                message="存在硬性阻断",
+                subject_ids=hard_blocker_ids,
+            )
+        )
+
+    evidence_gap_ids = [
+        gap.subject_id for gap in result.gaps if gap.kind is GapKind.EVIDENCE_GAP
+    ]
+    if evidence_gap_ids:
+        blockers.append(
+            ReadyToApplyBlocker(
+                code="unresolved_evidence_gap",
+                message="存在未解决的证据差距",
+                subject_ids=evidence_gap_ids,
+            )
+        )
+    return blockers
 
 
 def _effective_review_status(

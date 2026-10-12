@@ -64,11 +64,17 @@ export function JobDetail({
 
       <EvidenceSection
         title="JD 与候选人证据"
-        jobEvidence={detail.preference_contributions.flatMap((item) => item.job_evidence)}
-        candidateEvidence={detail.qualification_contributions.flatMap(
-          (item) => item.candidate_evidence,
-        )}
-        traceEvidence={detail.trace_evidence}
+        jobEvidence={uniqueEvidence([
+          ...detail.preference_contributions.flatMap((item) => item.job_evidence),
+          ...detail.qualification_contributions.flatMap((item) => item.job_evidence),
+          ...detail.trace_evidence,
+        ])}
+        candidateEvidence={uniqueEvidence([
+          ...detail.preference_contributions.flatMap((item) => item.candidate_evidence),
+          ...detail.qualification_contributions.flatMap(
+            (item) => item.candidate_evidence,
+          ),
+        ])}
       />
 
       <section className="review-section" aria-labelledby="review-heading">
@@ -86,7 +92,11 @@ export function JobDetail({
           </button>
         </div>
         {!summary.can_mark_ready_to_apply && (
-          <p className="action-reason">服务端判定此岗位暂不可加入待申请</p>
+          <ul className="action-reasons" aria-label="暂不可加入待申请的原因">
+            {(detail.ready_to_apply_blockers ?? []).map((blocker) => (
+              <li key={blocker.code}>{blocker.message}</li>
+            ))}
+          </ul>
         )}
       </section>
     </article>
@@ -123,24 +133,26 @@ function EvidenceSection({
   title,
   jobEvidence,
   candidateEvidence,
-  traceEvidence,
 }: {
   title: string;
   jobEvidence: string[];
   candidateEvidence: string[];
-  traceEvidence: string[];
 }) {
   return (
     <section className="evidence-section">
       <details>
         <summary>{title}</summary>
         <EvidenceLists
-          jobEvidence={jobEvidence.length ? jobEvidence : traceEvidence}
+          jobEvidence={jobEvidence}
           candidateEvidence={candidateEvidence}
         />
       </details>
     </section>
   );
+}
+
+function uniqueEvidence(items: string[]): string[] {
+  return [...new Set(items)];
 }
 
 function EvidenceLists({

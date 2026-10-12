@@ -241,6 +241,56 @@ def test_job_detail_preserves_all_four_gap_kinds_and_evidence(tmp_path) -> None:
     assert detail.trace_evidence == [JOB_REF]
 
 
+@pytest.mark.parametrize(
+    ("recommendation", "gaps", "expected_codes", "expected_subject_ids"),
+    [
+        (
+            RecommendationLevel.APPLY_AFTER_REVIEW,
+            [],
+            ["recommendation_not_priority"],
+            [[]],
+        ),
+        (
+            RecommendationLevel.PRIORITY_APPLY,
+            [_gap(GapKind.HARD_BLOCKER)],
+            ["hard_blocker"],
+            [["hard_blocker-subject"]],
+        ),
+        (
+            RecommendationLevel.PRIORITY_APPLY,
+            [_gap(GapKind.EVIDENCE_GAP)],
+            ["unresolved_evidence_gap"],
+            [["evidence_gap-subject"]],
+        ),
+    ],
+)
+def test_job_detail_returns_server_owned_ready_blockers(
+    tmp_path,
+    recommendation,
+    gaps,
+    expected_codes,
+    expected_subject_ids,
+) -> None:
+    store = _store(tmp_path)
+    store.insert_analysis(_analysis(recommendation=recommendation, gaps=gaps))
+
+    detail = _workspace(store).get_job_detail(ANALYSIS_ID)
+
+    assert [item.code for item in detail.ready_to_apply_blockers] == expected_codes
+    assert [item.subject_ids for item in detail.ready_to_apply_blockers] == expected_subject_ids
+    assert all(item.message for item in detail.ready_to_apply_blockers)
+
+
+def test_job_detail_has_no_ready_blockers_when_server_gate_allows_ready(tmp_path) -> None:
+    store = _store(tmp_path)
+    store.insert_analysis(_analysis())
+
+    detail = _workspace(store).get_job_detail(ANALYSIS_ID)
+
+    assert detail.summary.can_mark_ready_to_apply is True
+    assert detail.ready_to_apply_blockers == []
+
+
 def test_ready_to_apply_requires_priority_recommendation(tmp_path) -> None:
     store = _store(tmp_path)
     store.insert_analysis(

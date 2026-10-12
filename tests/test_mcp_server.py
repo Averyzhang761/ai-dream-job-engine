@@ -159,6 +159,9 @@ async def test_tool_schemas_use_domain_contracts() -> None:
     review_schema = tools["set_job_review_status"].input_schema
     assert "JobReviewStatus" in review_schema["$defs"]
     assert set(review_schema["required"]) == {"analysis_id", "status"}
+    detail_schema = tools["get_workspace_job"].output_schema
+    assert "ReadyToApplyBlocker" in detail_schema["$defs"]
+    assert "ready_to_apply_blockers" in detail_schema["properties"]
 
 
 @pytest.mark.asyncio

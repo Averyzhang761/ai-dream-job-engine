@@ -70,6 +70,16 @@ export interface WorkspaceJobDetail {
   preference_contributions: DecisionContribution[];
   qualification_contributions: DecisionContribution[];
   trace_evidence: string[];
+  ready_to_apply_blockers: ReadyToApplyBlocker[];
+}
+
+export interface ReadyToApplyBlocker {
+  code:
+    | "recommendation_not_priority"
+    | "hard_blocker"
+    | "unresolved_evidence_gap";
+  message: string;
+  subject_ids: string[];
 }
 
 export interface WorkspaceSnapshot {

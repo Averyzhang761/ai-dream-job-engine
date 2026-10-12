@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -52,7 +52,24 @@ function detail(jobSummary = summary()): WorkspaceJobDetail {
     preference_contributions: [{ subject_id: "product_facing", score: 0.9, weight: 1, input_ids: ["product_facing"], job_evidence: ["Partner with customers"], candidate_evidence: [], audit_support: [] }],
     qualification_contributions: [],
     trace_evidence: ["Partner with customers", "Ship production AI systems"],
+    ready_to_apply_blockers: jobSummary.can_mark_ready_to_apply
+      ? []
+      : [{
+          code: "recommendation_not_priority",
+          message: "服务端原因：推荐等级不是优先申请",
+          subject_ids: [],
+        }],
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 function payload(jobs: WorkspaceJobSummary[]): WorkspaceAppPayload {
@@ -148,8 +165,13 @@ describe("job workspace", () => {
     expect(screen.getByText("证据差距")).toBeVisible();
     const jobDetail = screen.getByRole("article", { name: "岗位判断详情" });
     expect(within(jobDetail).getByText("缺少生产环境 AI 项目证据")).toBeVisible();
-    await user.click(within(jobDetail).getAllByText("查看证据")[1]);
-    expect(within(jobDetail).getByText("Ship production AI systems")).toBeVisible();
+    const evidenceGapSection = within(jobDetail)
+      .getByRole("heading", { name: "证据差距" })
+      .closest("section")!;
+    await user.click(within(evidenceGapSection).getByText("查看证据"));
+    expect(
+      within(evidenceGapSection).getByText("Ship production AI systems"),
+    ).toBeVisible();
   });
 
   it("persists keep and ignore only from returned server detail", async () => {
@@ -177,7 +199,7 @@ describe("job workspace", () => {
     const user = userEvent.setup();
     render(<App bridge={bridgeWithPayload(payload([summary({ analysis_id: "ineligible" })]))} />);
     expect(await screen.findByRole("button", { name: "加入待申请" })).toBeDisabled();
-    expect(screen.getByText("服务端判定此岗位暂不可加入待申请")).toBeVisible();
+    expect(screen.getByText("服务端原因：推荐等级不是优先申请")).toBeVisible();
 
     cleanup();
     let eligible = summary({ analysis_id: "eligible", recommendation: "priority_apply", can_mark_ready_to_apply: true, top_unresolved_gap: null });
@@ -216,5 +238,110 @@ describe("job workspace", () => {
     ).toBeVisible();
     expect(screen.getByRole("button", { name: "加入待申请" })).toBeDisabled();
     expect(screen.queryByText("private server detail")).not.toBeInTheDocument();
+  });
+
+  it("does not let a stale action response replace the newly selected job", async () => {
+    const user = userEvent.setup();
+    const first = summary({ analysis_id: "first", title: "First job" });
+    const second = summary({ analysis_id: "second", title: "Second job" });
+    const action = deferred<WorkspaceJobDetail>();
+    const actionCalls: Array<{ analysis_id: string; status: string }> = [];
+    const bridge = bridgeWithPayload(payload([first, second]), async (name, args) => {
+      const analysisId = (args as { analysis_id: string }).analysis_id;
+      if (name === "get_workspace_job") {
+        return detail(analysisId === "first" ? first : second);
+      }
+      actionCalls.push(args as { analysis_id: string; status: string });
+      return action.promise;
+    });
+    render(<App bridge={bridge} />);
+
+    await screen.findByRole("heading", { name: "First job" });
+    await user.click(screen.getByRole("button", { name: "保留" }));
+    await user.click(screen.getByRole("button", { name: /Second job/ }));
+    expect(await screen.findByRole("heading", { name: "Second job" })).toBeVisible();
+
+    action.resolve(detail({ ...first, review_status: "kept" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("heading", { name: "First job" })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "忽略" })).not.toBeDisabled();
+    });
+
+    await user.click(screen.getByRole("button", { name: "忽略" }));
+    expect(actionCalls).toEqual([
+      { analysis_id: "first", status: "kept" },
+      { analysis_id: "second", status: "ignored" },
+    ]);
+  });
+
+  it("preserves JD and candidate evidence from both contribution groups", async () => {
+    const user = userEvent.setup();
+    const job = summary({ analysis_id: "evidence" });
+    const fullDetail = detail(job);
+    fullDetail.preference_contributions[0].candidate_evidence = ["Preference candidate evidence"];
+    fullDetail.qualification_contributions = [{
+      subject_id: "qualification",
+      score: 0.8,
+      weight: 1,
+      input_ids: ["qualification"],
+      job_evidence: ["Qualification JD evidence"],
+      candidate_evidence: ["Qualification candidate evidence"],
+      audit_support: [],
+    }];
+    const bridge = bridgeWithPayload(payload([job]), async () => fullDetail);
+    render(<App bridge={bridge} />);
+
+    await user.click(await screen.findByText("JD 与候选人证据"));
+    const evidenceSection = screen.getByText("JD 与候选人证据").closest("section")!;
+    expect(within(evidenceSection).getByText("Partner with customers")).toBeVisible();
+    expect(within(evidenceSection).getByText("Qualification JD evidence")).toBeVisible();
+    expect(within(evidenceSection).getByText("Preference candidate evidence")).toBeVisible();
+    expect(within(evidenceSection).getByText("Qualification candidate evidence")).toBeVisible();
+    expect(within(evidenceSection).getAllByText("Partner with customers")).toHaveLength(1);
+  });
+
+  it("retries a failed detail load for the same selected job", async () => {
+    const user = userEvent.setup();
+    const job = summary({ analysis_id: "retry", title: "Retry job" });
+    let reads = 0;
+    const bridge = bridgeWithPayload(payload([job]), async (name, args) => {
+      if (name !== "get_workspace_job") throw new Error("unexpected");
+      reads += 1;
+      if (reads === 1) throw new Error("private read failure");
+      expect(args).toEqual({ analysis_id: "retry" });
+      return detail(job);
+    });
+    render(<App bridge={bridge} />);
+
+    await user.click(await screen.findByRole("button", { name: "重试载入详情" }));
+    expect(await screen.findByRole("heading", { name: "Retry job" })).toBeVisible();
+    expect(reads).toBe(2);
+    expect(screen.queryByText("private read failure")).not.toBeInTheDocument();
+  });
+
+  it("renders the refusal reasons returned by the server", async () => {
+    const job = summary({ analysis_id: "blocked" });
+    const blockedDetail = detail(job);
+    blockedDetail.ready_to_apply_blockers = [
+      {
+        code: "hard_blocker",
+        message: "服务端原因：存在硬性阻断",
+        subject_ids: ["work_authorization"],
+      },
+      {
+        code: "unresolved_evidence_gap",
+        message: "服务端原因：存在未解决证据差距",
+        subject_ids: ["production_ai"],
+      },
+    ];
+    render(
+      <App
+        bridge={bridgeWithPayload(payload([job]), async () => blockedDetail)}
+      />,
+    );
+
+    expect(await screen.findByText("服务端原因：存在硬性阻断")).toBeVisible();
+    expect(screen.getByText("服务端原因：存在未解决证据差距")).toBeVisible();
+    expect(screen.queryByText("服务端判定此岗位暂不可加入待申请")).not.toBeInTheDocument();
   });
 });
