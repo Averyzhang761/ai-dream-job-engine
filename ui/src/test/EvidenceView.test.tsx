@@ -49,6 +49,7 @@ const profile: CandidateProfile = {
     },
   ],
   import_receipts: [],
+  memory_connections: [{ source_agent: "Codex", scope: ["项目"], connected: true }],
 };
 
 const preview: ClaimPreviewView = {
@@ -186,6 +187,22 @@ describe("EvidenceView", () => {
       name: "disconnect_agent_memory",
       args: { source_agent: "Codex", delete_imported: true },
     }));
+  });
+
+  it("does not infer an Agent connection from retained imported claims", async () => {
+    const disconnectedProfile = {
+      ...profile,
+      memory_connections: [{ source_agent: "Codex", scope: ["项目"], connected: false }],
+    };
+    const disconnectedBridge = bridge();
+    disconnectedBridge.value.callTool = async <T,>(name: string) => {
+      if (name === "get_candidate_profile") return disconnectedProfile as T;
+      throw new Error("unexpected tool");
+    };
+
+    render(<EvidenceView bridge={disconnectedBridge.value} initialClaims={disconnectedProfile.claims} claimPreview={null} />);
+    expect(await screen.findByText("Production AI")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "断开 Codex" })).not.toBeInTheDocument();
   });
 
   it("does not let an old preview response hide a newer preview", async () => {

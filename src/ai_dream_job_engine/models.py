@@ -90,6 +90,12 @@ class ClaimImportReceipt(DomainModel):
         return self
 
 
+class AgentMemoryConnection(DomainModel):
+    source_agent: str = Field(min_length=1)
+    scope: list[str] = Field(min_length=1)
+    connected: bool = True
+
+
 class CandidateClaim(DomainModel):
     id: str = Field(min_length=1)
     claim_type: str = Field(min_length=1)
@@ -122,7 +128,9 @@ class CandidateProfile(DomainModel):
     id: str = "default"
     claims: list[CandidateClaim] = Field(default_factory=list)
     import_receipts: list[ClaimImportReceipt] = Field(default_factory=list)
+    memory_connections: list[AgentMemoryConnection] = Field(default_factory=list)
     version: str = "1"
+    storage_revision: int = Field(default=0, ge=0)
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -198,6 +206,7 @@ class Rubric(DomainModel):
     id: str = "default"
     version: str = Field(min_length=1)
     revision: str = ""
+    storage_revision: int = Field(default=0, ge=0)
     facts: list[FactDefinition] = Field(default_factory=list)
     dimensions: list[ValueDimension] = Field(default_factory=list)
     questions: list[DecisionQuestion] = Field(default_factory=list)
@@ -409,6 +418,7 @@ class AnalysisRecord(DomainModel):
     result: DecisionResult | None = None
     trace: DecisionTrace | None = None
     decision_surface: DecisionSurfaceManifest | None = None
+    evidence_catalog: dict[str, str] = Field(default_factory=dict)
     status: Literal["success", "failed"]
     latency_ms: int = Field(ge=0)
     error_category: str | None = None
@@ -447,10 +457,19 @@ class WorkspaceJobSummary(DomainModel):
     review_status: JobReviewStatus = JobReviewStatus.UNREVIEWED
     created_at: datetime
     can_mark_ready_to_apply: bool
+    stale_reasons: list[
+        Literal[
+            "profile_missing",
+            "rubric_missing",
+            "profile_changed",
+            "rubric_changed",
+        ]
+    ] = Field(default_factory=list)
 
 
 class ReadyToApplyBlocker(DomainModel):
     code: Literal[
+        "stale_analysis",
         "recommendation_not_priority",
         "hard_blocker",
         "unresolved_evidence_gap",

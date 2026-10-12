@@ -45,15 +45,61 @@ async def test_workspace_resource_is_self_contained_and_has_no_remote_domains() 
 
 
 @pytest.mark.asyncio
+async def test_render_tools_keep_private_hydration_out_of_structured_content() -> None:
+    server = _server()
+    tools = {tool.name: tool for tool in await server.list_tools()}
+
+    workspace = await server.call_tool("open_job_workspace", {})
+    preview = await server.call_tool(
+        "open_claim_review", {"preview_id": "p" * 32}
+    )
+
+    assert tools["open_job_workspace"].meta["ui"]["visibility"] == ["model", "app"]
+    assert tools["open_claim_review"].meta["ui"]["visibility"] == ["model", "app"]
+    assert "confirmed_claims" not in str(workspace.structured_content)
+    assert "confirmed only after action" not in str(preview.structured_content)
+    assert workspace.meta["aiDreamJobEngine"]["payload"]["view"] == "jobs"
+    assert preview.meta["aiDreamJobEngine"]["payload"]["claim_preview"]["candidates"][0]["id"] == "claim-1"
+
+
+@pytest.mark.asyncio
+async def test_private_ui_tools_are_app_only_and_return_payload_in_meta() -> None:
+    server = _server()
+    tools = {tool.name: tool for tool in await server.list_tools()}
+
+    for name in {
+        "get_workspace_snapshot",
+        "get_workspace_job",
+        "set_job_review_status",
+        "get_candidate_profile",
+        "get_claim_preview",
+        "get_rubric",
+        "update_rubric",
+        "confirm_profile_claims",
+        "confirm_agent_memory_import",
+        "disconnect_agent_memory",
+    }:
+        assert tools[name].meta["ui"]["visibility"] == ["app"]
+
+    result = await server.call_tool("get_candidate_profile", {})
+    assert result.structured_content == {"status": "ok"}
+    assert result.meta["aiDreamJobEngine"]["payload"]["id"] == "default"
+
+
+@pytest.mark.asyncio
 async def test_open_workspace_tool_links_only_to_workspace_resource() -> None:
     server = _server()
     tools = {item.name: item for item in await server.list_tools()}
 
     assert tools["open_job_workspace"].meta["ui"] == {
-        "resourceUri": WORKSPACE_RESOURCE_URI
+        "resourceUri": WORKSPACE_RESOURCE_URI,
+        "visibility": ["model", "app"],
     }
     assert tools["open_claim_review"].meta == {
-        "ui": {"resourceUri": WORKSPACE_RESOURCE_URI}
+        "ui": {
+            "resourceUri": WORKSPACE_RESOURCE_URI,
+            "visibility": ["model", "app"],
+        }
     }
 
     workspace = await server.call_tool("open_job_workspace", {})
@@ -62,11 +108,11 @@ async def test_open_workspace_tool_links_only_to_workspace_resource() -> None:
     )
 
     assert workspace.structured_content["view"] == "jobs"
-    assert workspace.structured_content["snapshot"]["profile_ready"] is True
-    assert workspace.structured_content["claim_preview"] is None
+    assert workspace.meta["aiDreamJobEngine"]["payload"]["snapshot"]["profile_ready"] is True
+    assert workspace.meta["aiDreamJobEngine"]["payload"]["claim_preview"] is None
     assert claim_review.structured_content["view"] == "claim_review"
-    assert claim_review.structured_content["claim_preview"]["preview_id"] == "p" * 32
-    assert claim_review.structured_content["claim_preview"]["candidates"][0]["confirmed"] is False
+    assert claim_review.meta["aiDreamJobEngine"]["payload"]["claim_preview"]["preview_id"] == "p" * 32
+    assert claim_review.meta["aiDreamJobEngine"]["payload"]["claim_preview"]["candidates"][0]["confirmed"] is False
 
 
 @pytest.mark.asyncio
@@ -76,7 +122,7 @@ async def test_claim_confirmation_tools_require_explicit_decisions_and_do_not_op
     for name in ("confirm_profile_claims", "confirm_agent_memory_import"):
         tool = tools[name]
         assert set(tool.input_schema["required"]) == {"preview_id", "decisions"}
-        assert not tool.meta or "ui" not in tool.meta
+        assert tool.meta["ui"]["visibility"] == ["app"]
         assert "explicit per-claim" in tool.description
 
 
@@ -98,7 +144,8 @@ async def test_existing_data_tools_have_no_output_template() -> None:
     for name, tool in tools.items():
         if name in render_tools:
             continue
-        assert not tool.meta or "ui" not in tool.meta
+        if tool.meta and "ui" in tool.meta:
+            assert "resourceUri" not in tool.meta["ui"]
         assert not tool.meta or "openai/outputTemplate" not in tool.meta
 
 
@@ -128,4 +175,4 @@ async def test_missing_ui_bundle_does_not_disable_existing_tools(monkeypatch) ->
 
     assert "get_workspace_snapshot" in tools
     assert snapshot.is_error is False
-    assert snapshot.structured_content["profile_ready"] is True
+    assert snapshot.meta["aiDreamJobEngine"]["payload"]["profile_ready"] is True

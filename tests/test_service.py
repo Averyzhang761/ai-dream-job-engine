@@ -302,6 +302,32 @@ def test_shared_sqlite_recomputes_serialize_revisions_and_stale_readiness(
     assert original.result is not None
     assert original.result.recommendation is RecommendationLevel.PRIORITY_APPLY
 
+    detail = WorkspaceApplication(
+        first_store,
+        profile_application=LocalProfileApplication(first_store),
+        analysis_application=ConfiguredAnalysisApplication(first_store),
+    ).get_job_detail(original.id)
+    displayed_job_evidence = [
+        item
+        for contribution in (
+            detail.preference_contributions + detail.qualification_contributions
+        )
+        for item in contribution.job_evidence
+    ]
+    displayed_candidate_evidence = [
+        item
+        for contribution in (
+            detail.preference_contributions + detail.qualification_contributions
+        )
+        for item in contribution.candidate_evidence
+    ]
+    assert "Senior Python Engineer" in displayed_job_evidence
+    assert "Senior Python Engineer" in displayed_candidate_evidence
+    assert not any(item.startswith("jd-evidence:") for item in displayed_job_evidence)
+    assert not any(
+        item.startswith("profile-ref:") for item in displayed_candidate_evidence
+    )
+
     database_path = tmp_path / "store.sqlite3"
     second_store = LocalStore.open(database_path)
     second_store.initialize()

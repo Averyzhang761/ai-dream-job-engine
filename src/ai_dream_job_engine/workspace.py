@@ -19,7 +19,12 @@ from ai_dream_job_engine.models import (
     WorkspaceJobSummary,
     WorkspaceSnapshot,
 )
-from ai_dream_job_engine.service import AnalysisServiceError
+from ai_dream_job_engine.service import (
+    AnalysisServiceError,
+    candidate_evidence_catalog,
+    current_decision_surface_manifest,
+)
+from ai_dream_job_engine.rubric import rubric_revision
 
 
 ANALYSIS_NOT_FOUND = (
@@ -109,7 +114,12 @@ class WorkspaceApplication:
         jobs = [
             self._summary(
                 record,
-                _effective_review_status(record, reviews.get(record.id)),
+                _effective_review_status(
+                    record,
+                    reviews.get(record.id),
+                    self._stale_reasons(record, profile, rubric),
+                ),
+                self._stale_reasons(record, profile, rubric),
             )
             for record in self._valid_analyses()
         ]
@@ -125,35 +135,52 @@ class WorkspaceApplication:
 
     def get_job_detail(self, analysis_id: str) -> WorkspaceJobDetail:
         record = self._get_valid_record(analysis_id)
+        profile = self._store_call(self._store.load_profile)
+        rubric = self._store_call(self._store.load_rubric)
+        stale_reasons = self._stale_reasons(record, profile, rubric)
         review = self._store_call(lambda: self._store.load_job_review(analysis_id))
-        status = _effective_review_status(record, review)
+        status = _effective_review_status(record, review, stale_reasons)
         result = record.result
         trace = record.trace
         if result is None or trace is None:
             raise WorkspaceError(ANALYSIS_UNAVAILABLE)
+        evidence = dict(record.evidence_catalog)
+        if profile is not None:
+            evidence.update(candidate_evidence_catalog(profile))
         return WorkspaceJobDetail(
-            summary=self._summary(record, status),
+            summary=self._summary(record, status, stale_reasons),
             gaps={
-                kind: [gap.model_copy(deep=True) for gap in result.gaps if gap.kind is kind]
+                kind: [
+                    _resolve_evidence(gap, evidence)
+                    for gap in result.gaps
+                    if gap.kind is kind
+                ]
                 for kind in GapKind
             },
             preference_contributions=[
-                item.model_copy(deep=True) for item in result.preference_contributions
+                _resolve_evidence(item, evidence)
+                for item in result.preference_contributions
             ],
             qualification_contributions=[
-                item.model_copy(deep=True) for item in result.qualification_contributions
+                _resolve_evidence(item, evidence)
+                for item in result.qualification_contributions
             ],
-            trace_evidence=list(trace.evidence),
-            ready_to_apply_blockers=_ready_to_apply_blockers(record),
+            trace_evidence=[evidence.get(item, item) for item in trace.evidence],
+            ready_to_apply_blockers=_ready_to_apply_blockers(
+                record, stale_reasons
+            ),
         )
 
     def set_review_status(
         self, analysis_id: str, status: JobReviewStatus
     ) -> WorkspaceJobDetail:
         record = self._get_valid_record(analysis_id)
+        profile = self._store_call(self._store.load_profile)
+        rubric = self._store_call(self._store.load_rubric)
+        stale_reasons = self._stale_reasons(record, profile, rubric)
         if (
             status is JobReviewStatus.READY_TO_APPLY
-            and not _can_mark_ready_to_apply(record)
+            and not _can_mark_ready_to_apply(record, stale_reasons)
         ):
             raise WorkspaceError(REVIEW_STATUS_INELIGIBLE)
         self._store_call(
@@ -204,7 +231,9 @@ class WorkspaceApplication:
 
     @staticmethod
     def _summary(
-        record: AnalysisRecord, review_status: JobReviewStatus
+        record: AnalysisRecord,
+        review_status: JobReviewStatus,
+        stale_reasons: list[str],
     ) -> WorkspaceJobSummary:
         result = record.result
         if result is None:
@@ -221,8 +250,30 @@ class WorkspaceApplication:
             ),
             review_status=review_status,
             created_at=record.created_at,
-            can_mark_ready_to_apply=_can_mark_ready_to_apply(record),
+            can_mark_ready_to_apply=_can_mark_ready_to_apply(
+                record, stale_reasons
+            ),
+            stale_reasons=stale_reasons,
         )
+
+    @staticmethod
+    def _stale_reasons(record, profile, rubric) -> list[str]:
+        reasons: list[str] = []
+        if profile is None:
+            reasons.append("profile_missing")
+        if rubric is None:
+            reasons.append("rubric_missing")
+        if rubric is not None and record.result is not None:
+            if record.result.rubric_revision != rubric_revision(rubric):
+                reasons.append("rubric_changed")
+        if profile is not None and rubric is not None:
+            current = current_decision_surface_manifest(profile, rubric)
+            if (
+                record.decision_surface is None
+                or record.decision_surface.profile_refs != current.profile_refs
+            ):
+                reasons.append("profile_changed")
+        return reasons
 
     @staticmethod
     def _store_call(operation):
@@ -234,16 +285,28 @@ class WorkspaceApplication:
             raise WorkspaceError(STORAGE_FAILURE) from None
 
 
-def _can_mark_ready_to_apply(record: AnalysisRecord) -> bool:
-    return not _ready_to_apply_blockers(record)
+def _can_mark_ready_to_apply(
+    record: AnalysisRecord, stale_reasons: list[str]
+) -> bool:
+    return not _ready_to_apply_blockers(record, stale_reasons)
 
 
-def _ready_to_apply_blockers(record: AnalysisRecord) -> list[ReadyToApplyBlocker]:
+def _ready_to_apply_blockers(
+    record: AnalysisRecord, stale_reasons: list[str]
+) -> list[ReadyToApplyBlocker]:
     result = record.result
     if result is None:
         raise WorkspaceError(ANALYSIS_UNAVAILABLE)
 
     blockers: list[ReadyToApplyBlocker] = []
+    if stale_reasons:
+        blockers.append(
+            ReadyToApplyBlocker(
+                code="stale_analysis",
+                message="候选人证据或岗位标准已变化，请重新计算",
+                subject_ids=list(stale_reasons),
+            )
+        )
     if result.recommendation is not RecommendationLevel.PRIORITY_APPLY:
         blockers.append(
             ReadyToApplyBlocker(
@@ -279,13 +342,18 @@ def _ready_to_apply_blockers(record: AnalysisRecord) -> list[ReadyToApplyBlocker
 
 
 def _effective_review_status(
-    record: AnalysisRecord, review: JobReviewRecord | None
+    record: AnalysisRecord,
+    review: JobReviewRecord | None,
+    stale_reasons: list[str],
 ) -> JobReviewStatus:
     if review is None:
         return JobReviewStatus.UNREVIEWED
     if (
         review.status is JobReviewStatus.READY_TO_APPLY
-        and review.decision_revision != record.decision_revision
+        and (
+            review.decision_revision != record.decision_revision
+            or bool(stale_reasons)
+        )
     ):
         return JobReviewStatus.UNREVIEWED
     return review.status
@@ -299,3 +367,15 @@ def _text_fact(record: AnalysisRecord, *fact_ids: str) -> str | None:
             if value:
                 return value
     return None
+
+
+def _resolve_evidence(item, catalog: dict[str, str]):
+    return item.model_copy(
+        update={
+            "job_evidence": [catalog.get(value, value) for value in item.job_evidence],
+            "candidate_evidence": [
+                catalog.get(value, value) for value in item.candidate_evidence
+            ],
+        },
+        deep=True,
+    )

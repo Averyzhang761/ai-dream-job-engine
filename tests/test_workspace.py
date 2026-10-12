@@ -27,6 +27,7 @@ from ai_dream_job_engine.models import (
     Rubric,
 )
 from ai_dream_job_engine.service import AnalysisServiceError
+from ai_dream_job_engine.rubric import rubric_revision
 from ai_dream_job_engine.workspace import WorkspaceApplication, WorkspaceError
 
 
@@ -65,6 +66,13 @@ def _store(tmp_path) -> LocalStore:
     return store
 
 
+def _ready_store(tmp_path) -> LocalStore:
+    store = _store(tmp_path)
+    store.save_profile(CandidateProfile())
+    store.save_rubric(Rubric(version="rubric-v1"))
+    return store
+
+
 def _workspace(store: LocalStore) -> WorkspaceApplication:
     return WorkspaceApplication(
         store,
@@ -80,8 +88,14 @@ def _analysis(
     recommendation: RecommendationLevel = RecommendationLevel.PRIORITY_APPLY,
     gaps: list[Gap] | None = None,
     decision_revision: int = 1,
+    rubric_revision_value: str | None = None,
+    profile_refs: list[str] | None = None,
+    evidence_catalog: dict[str, str] | None = None,
 ) -> AnalysisRecord:
     gaps = gaps or []
+    rubric_revision_value = rubric_revision_value or rubric_revision(
+        Rubric(version="rubric-v1")
+    )
     fact_ids = ["company", "job_title", "requirement"]
     facts = [
         ExtractedFact(
@@ -123,7 +137,7 @@ def _analysis(
             contribution.model_copy(update={"subject_id": "qualification"})
         ],
         rubric_version="rubric-v1",
-        rubric_revision="sha256:fixture",
+        rubric_revision=rubric_revision_value,
         prompt_version="facts:fixture-prompt-v1",
         model_versions={"facts": "fixture-v1"},
     )
@@ -141,12 +155,16 @@ def _analysis(
             providers={"facts": "fixture"},
             model_versions={"facts": "fixture-v1"},
             rubric_version="rubric-v1",
-            rubric_revision="sha256:fixture",
+            rubric_revision=rubric_revision_value,
             prompt_versions={"facts": "fixture-prompt-v1"},
             result_version="1",
             outbound_data_classes=[DataClass.PUBLIC_JOB_DATA],
         ),
-        decision_surface=DecisionSurfaceManifest(fact_ids=fact_ids),
+        decision_surface=DecisionSurfaceManifest(
+            fact_ids=fact_ids,
+            profile_refs=profile_refs or [],
+        ),
+        evidence_catalog=evidence_catalog or {},
         status="success",
         latency_ms=1,
         created_at=created_at,
@@ -271,7 +289,7 @@ def test_job_detail_returns_server_owned_ready_blockers(
     expected_codes,
     expected_subject_ids,
 ) -> None:
-    store = _store(tmp_path)
+    store = _ready_store(tmp_path)
     store.insert_analysis(_analysis(recommendation=recommendation, gaps=gaps))
 
     detail = _workspace(store).get_job_detail(ANALYSIS_ID)
@@ -282,7 +300,7 @@ def test_job_detail_returns_server_owned_ready_blockers(
 
 
 def test_job_detail_has_no_ready_blockers_when_server_gate_allows_ready(tmp_path) -> None:
-    store = _store(tmp_path)
+    store = _ready_store(tmp_path)
     store.insert_analysis(_analysis())
 
     detail = _workspace(store).get_job_detail(ANALYSIS_ID)
@@ -332,7 +350,7 @@ def test_ready_to_apply_rejects_unresolved_evidence_gap(tmp_path) -> None:
 def test_ready_to_apply_requires_new_action_after_each_decision_revision(
     tmp_path,
 ) -> None:
-    store = _store(tmp_path)
+    store = _ready_store(tmp_path)
     store.insert_analysis(_analysis(decision_revision=1))
     workspace = _workspace(store)
 
@@ -472,3 +490,95 @@ def test_claim_preview_does_not_mutate_profile(tmp_path) -> None:
     assert first.kind == "profile_claims"
     assert second.candidates[0].value == "five years"
     assert store.load_profile() == original
+
+
+def test_missing_profile_and_rubric_make_analysis_stale_and_block_ready(tmp_path) -> None:
+    store = _store(tmp_path)
+    store.save_analysis(_analysis())
+    workspace = _workspace(store)
+
+    snapshot = workspace.get_snapshot()
+    detail = workspace.get_job_detail(ANALYSIS_ID)
+
+    assert set(snapshot.jobs[0].stale_reasons) == {"profile_missing", "rubric_missing"}
+    assert detail.summary.can_mark_ready_to_apply is False
+    assert detail.ready_to_apply_blockers[0].code == "stale_analysis"
+    with pytest.raises(WorkspaceError, match="review_status_ineligible"):
+        workspace.set_review_status(ANALYSIS_ID, JobReviewStatus.READY_TO_APPLY)
+
+
+def test_changed_profile_evidence_marks_analysis_stale_after_restart(tmp_path) -> None:
+    store = _store(tmp_path)
+    original_profile = CandidateProfile()
+    rubric = Rubric(version="rubric-v1")
+    store.save_profile(original_profile)
+    store.save_rubric(rubric)
+    record = _analysis(
+        rubric_revision_value=rubric_revision(rubric),
+        profile_refs=[],
+    )
+    store.save_analysis(record)
+    changed = CandidateProfile(
+        claims=[
+            CandidateClaim(
+                id="new-evidence",
+                claim_type="python",
+                value="production Python",
+                source=ClaimSource.USER_CONFIRMED,
+                confirmed=True,
+            )
+        ]
+    )
+    store.save_profile(changed)
+
+    restarted = _workspace(LocalStore.open(tmp_path / "workspace.sqlite3"))
+    detail = restarted.get_job_detail(ANALYSIS_ID)
+
+    assert "profile_changed" in detail.summary.stale_reasons
+    assert detail.summary.can_mark_ready_to_apply is False
+
+
+def test_job_detail_resolves_real_service_references_for_app(tmp_path) -> None:
+    store = _store(tmp_path)
+    claim = CandidateClaim(
+        id="python-evidence",
+        claim_type="python",
+        value="production Python",
+        source=ClaimSource.USER_CONFIRMED,
+        confirmed=True,
+        source_quote="Built production Python services",
+    )
+    profile = CandidateProfile(claims=[claim])
+    rubric = Rubric(version="rubric-v1")
+    store.save_profile(profile)
+    store.save_rubric(rubric)
+    from ai_dream_job_engine.service import current_decision_surface_manifest
+
+    surface = current_decision_surface_manifest(profile, rubric)
+    record = _analysis(
+        rubric_revision_value=rubric_revision(rubric),
+        profile_refs=surface.profile_refs,
+        evidence_catalog={JOB_REF: "x"},
+    )
+    from ai_dream_job_engine.service import candidate_evidence_catalog
+    profile_ref = next(iter(candidate_evidence_catalog(profile)), None)
+    if profile_ref:
+        contribution = record.result.preference_contributions[0].model_copy(
+            update={"candidate_evidence": [profile_ref]}
+        )
+        record = record.model_copy(
+            update={
+                "result": record.result.model_copy(
+                    update={"preference_contributions": [contribution]}
+                )
+            }
+        )
+    store.save_analysis(record)
+
+    detail = _workspace(store).get_job_detail(ANALYSIS_ID)
+
+    assert detail.preference_contributions[0].job_evidence == ["x"]
+    if profile_ref:
+        assert detail.preference_contributions[0].candidate_evidence == [
+            "Built production Python services"
+        ]

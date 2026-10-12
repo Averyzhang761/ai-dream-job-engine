@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from ai_dream_job_engine.models import (
+    AgentMemoryConnection,
     CandidateClaim,
     CandidateProfile,
     ClaimImportOrigin,
@@ -477,8 +478,16 @@ def disconnect_memory_source(
     """Optionally revoke module-confirmed claims linked to one Agent source."""
 
     _validate_profile(profile)
+    connections = [
+        item.model_copy(update={"connected": False}, deep=True)
+        if item.source_agent == source_agent
+        else item.model_copy(deep=True)
+        for item in profile.memory_connections
+    ]
     if not delete_imported:
-        return profile.model_copy(deep=True)
+        return profile.model_copy(
+            update={"memory_connections": connections}, deep=True
+        )
 
     claims_by_id = {claim.id: claim for claim in profile.claims}
     matched_receipt_ids = {
@@ -501,5 +510,32 @@ def disconnect_memory_source(
         if receipt.confirmed_claim_id not in matched_receipt_ids
     ]
     return profile.model_copy(
-        update={"claims": claims, "import_receipts": receipts}, deep=True
+        update={
+            "claims": claims,
+            "import_receipts": receipts,
+            "memory_connections": connections,
+        },
+        deep=True,
+    )
+
+
+def profile_with_memory_connection(
+    profile: CandidateProfile, preview: MemoryImportPreview
+) -> CandidateProfile:
+    """Persist explicit source authorization separately from retained claims."""
+
+    connection = AgentMemoryConnection(
+        source_agent=preview.source_agent,
+        scope=list(preview.scope),
+        connected=True,
+    )
+    connections = [
+        item.model_copy(deep=True)
+        for item in profile.memory_connections
+        if item.source_agent != preview.source_agent
+    ]
+    connections.append(connection)
+    connections.sort(key=lambda item: item.source_agent)
+    return profile.model_copy(
+        update={"memory_connections": connections}, deep=True
     )

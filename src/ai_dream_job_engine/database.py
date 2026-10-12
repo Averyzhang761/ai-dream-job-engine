@@ -80,11 +80,25 @@ class LocalStore:
     def load_profile(self) -> CandidateProfile | None:
         return self._load_singleton("profiles", CandidateProfile)
 
+    def compare_and_swap_profile(
+        self, profile: CandidateProfile, expected_storage_revision: int
+    ) -> bool:
+        return self._compare_and_swap_singleton(
+            "profiles", profile, expected_storage_revision
+        )
+
     def save_rubric(self, rubric: Rubric) -> None:
         self._save_singleton("rubrics", rubric)
 
     def load_rubric(self) -> Rubric | None:
         return self._load_singleton("rubrics", Rubric)
+
+    def compare_and_swap_rubric(
+        self, rubric: Rubric, expected_storage_revision: int
+    ) -> bool:
+        return self._compare_and_swap_singleton(
+            "rubrics", rubric, expected_storage_revision
+        )
 
     def save_analysis(self, record: AnalysisRecord) -> None:
         self._save(
@@ -212,6 +226,43 @@ class LocalStore:
 
     def _save_singleton(self, table: str, model: BaseModel) -> None:
         self._save(table, _ACTIVE_ID, model, datetime.now(timezone.utc).isoformat())
+
+    def _compare_and_swap_singleton(
+        self,
+        table: str,
+        model: CandidateProfile | Rubric,
+        expected_storage_revision: int,
+    ) -> bool:
+        if model.storage_revision != expected_storage_revision + 1:
+            raise StoreError("invalid singleton revision update")
+        now = datetime.now(timezone.utc).isoformat()
+        model_type = CandidateProfile if table == "profiles" else Rubric
+        try:
+            with closing(sqlite3.connect(self._path)) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    f"SELECT schema_version, payload FROM {table} WHERE id = ?",
+                    (_ACTIVE_ID,),
+                ).fetchone()
+                if row is None:
+                    connection.rollback()
+                    return False
+                current = self._validate_payload(table[:-1], row, model_type)
+                if current.storage_revision != expected_storage_revision:
+                    connection.rollback()
+                    return False
+                connection.execute(
+                    f"""
+                    UPDATE {table}
+                    SET schema_version = ?, payload = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (SCHEMA_VERSION, model.model_dump_json(), now, _ACTIVE_ID),
+                )
+                connection.commit()
+                return True
+        except sqlite3.DatabaseError as error:
+            raise StoreError(f"{table[:-1]} compare-and-swap failed") from error
 
     def _save(
         self,

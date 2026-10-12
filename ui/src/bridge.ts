@@ -1,6 +1,6 @@
 import { App } from "@modelcontextprotocol/ext-apps";
 
-import type { ToolResultEnvelope } from "./contracts";
+import { privatePayload, type ToolResultEnvelope } from "./contracts";
 
 export const UI_UNAVAILABLE_MESSAGE =
   "UI unavailable; use the conversation tools";
@@ -33,6 +33,7 @@ export function createMcpAppBridge(
   app.addEventListener("toolresult", (result) => {
     const envelope: ToolResultEnvelope = {
       structuredContent: result.structuredContent,
+      _meta: result._meta,
       isError: result.isError,
     };
     for (const listener of listeners) {
@@ -75,10 +76,11 @@ export function createMcpAppBridge(
         name,
         arguments: args as Record<string, unknown>,
       });
-      if (result.isError || result.structuredContent === undefined) {
+      const payload = privatePayload(result);
+      if (result.isError || payload === undefined) {
         throw new Error("The local tool request failed.");
       }
-      return result.structuredContent as T;
+      return payload as T;
     },
 
     async sendMessage(message: string): Promise<void> {

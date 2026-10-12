@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import importlib
 import re
 import time
@@ -183,6 +184,22 @@ class _PersistedRecordSafety:
             raise ValueError("trace input refs incomplete")
         return record
 
+    def evidence_catalog(self, record: AnalysisRecord) -> dict[str, str]:
+        """Retain only cited public excerpts, never the complete supplied JD."""
+
+        if self.raw_job is None:
+            return dict(record.evidence_catalog)
+        refs = _record_job_refs(record)
+        catalog: dict[str, str] = {}
+        for ref in refs:
+            start, end, expected_digest = _parse_jd_ref(
+                ref, self.job_digest, len(self.raw_job)
+            )
+            excerpt = self.raw_job[start:end]
+            if excerpt != self.raw_job and _digest(excerpt) == expected_digest:
+                catalog[ref] = excerpt
+        return catalog
+
     def _complete(
         self,
         facts: list[ExtractedFact],
@@ -316,8 +333,7 @@ class JobAnalysisService:
                 result,
                 metadata,
             )
-            record = safety.validate(
-                AnalysisRecord(
+            candidate = AnalysisRecord(
                     id=analysis_id,
                     input_hash=input_hash,
                     input_length=len(job_description),
@@ -333,6 +349,10 @@ class JobAnalysisService:
                         started_at, self._monotonic_clock()
                     ),
                     created_at=created_at,
+                )
+            record = safety.validate(
+                candidate.model_copy(
+                    update={"evidence_catalog": safety.evidence_catalog(candidate)}
                 )
             )
         except Exception:
@@ -660,10 +680,7 @@ def _decision_surface(
         for item in sorted(rubric.questions, key=lambda item: item.id)
     }
     profile_refs = frozenset(
-        {
-            profile.id,
-            *(claim.id for claim in profile.claims if claim.confirmed),
-        }
+        claim.id for claim in profile.claims if claim.confirmed
     )
     return _DecisionSurface(
         input_ids=frozenset(
@@ -685,6 +702,30 @@ def _surface_manifest(surface: _DecisionSurface) -> DecisionSurfaceManifest:
         question_versions=surface.question_versions,
         profile_refs=sorted(surface.profile_refs),
     )
+
+
+def current_decision_surface_manifest(
+    profile: CandidateProfile, rubric: Rubric
+) -> DecisionSurfaceManifest:
+    """Return the privacy-projected input surface for staleness checks."""
+
+    return _surface_manifest(_decision_surface(_safe_profile(profile), rubric))
+
+
+def candidate_evidence_catalog(profile: CandidateProfile) -> dict[str, str]:
+    """Resolve opaque claim references for the local app only."""
+
+    safe = _safe_profile(profile)
+    catalog: dict[str, str] = {}
+    for claim, safe_claim in zip(profile.claims, safe.claims, strict=True):
+        if not claim.confirmed:
+            continue
+        if claim.source_quote:
+            catalog[safe_claim.id] = claim.source_quote
+        else:
+            value = json.dumps(claim.value, ensure_ascii=False, sort_keys=True)
+            catalog[safe_claim.id] = f"{claim.claim_type}: {value}"
+    return catalog
 
 
 def _validate_stored_record(record: AnalysisRecord) -> None:
@@ -814,19 +855,15 @@ def _validate_stored_record(record: AnalysisRecord) -> None:
     ):
         raise ValueError("stored signal metadata mismatch")
 
-    job_refs = [
-        *(item for fact in record.facts for item in fact.evidence),
-        *(item for signal in record.signals for item in signal.evidence),
-        *(
-            item
-            for contribution in (
-                result.preference_contributions
-                + result.qualification_contributions
-            )
-            for item in contribution.job_evidence
-        ),
-        *(item for gap in result.gaps for item in gap.job_evidence),
-    ]
+    job_refs = _record_job_refs(record)
+    for ref, excerpt in record.evidence_catalog.items():
+        if ref not in job_refs:
+            raise ValueError("unbound evidence catalog entry")
+        start, end, expected_digest = _parse_jd_ref(
+            ref, job_digest, record.input_length
+        )
+        if end - start != len(excerpt) or _digest(excerpt) != expected_digest:
+            raise ValueError("invalid evidence catalog excerpt")
     profile_refs = [
         *(
             item
@@ -867,6 +904,33 @@ def _validate_stored_record(record: AnalysisRecord) -> None:
     }
     if trace.evidence != sorted(expected_evidence):
         raise ValueError("stored trace evidence is unbound")
+
+
+def _record_job_refs(record: AnalysisRecord) -> list[str]:
+    result = record.result
+    trace = record.trace
+    if result is None:
+        return []
+    refs = [
+        *(item for fact in record.facts for item in fact.evidence),
+        *(item for signal in record.signals for item in signal.evidence),
+        *(
+            item
+            for contribution in (
+                result.preference_contributions
+                + result.qualification_contributions
+            )
+            for item in contribution.job_evidence
+        ),
+        *(item for gap in result.gaps for item in gap.job_evidence),
+    ]
+    if trace is not None:
+        refs.extend(
+            item
+            for item in trace.evidence
+            if not _PROFILE_REF_PATTERN.fullmatch(item)
+        )
+    return sorted(set(refs))
 
 
 def _validate_stored_record_or_raise(record: AnalysisRecord) -> None:

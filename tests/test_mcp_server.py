@@ -159,9 +159,7 @@ async def test_tool_schemas_use_domain_contracts() -> None:
     review_schema = tools["set_job_review_status"].input_schema
     assert "JobReviewStatus" in review_schema["$defs"]
     assert set(review_schema["required"]) == {"analysis_id", "status"}
-    detail_schema = tools["get_workspace_job"].output_schema
-    assert "ReadyToApplyBlocker" in detail_schema["$defs"]
-    assert "ready_to_apply_blockers" in detail_schema["properties"]
+    assert tools["get_workspace_job"].output_schema is None
 
 
 @pytest.mark.asyncio
@@ -173,11 +171,12 @@ async def test_workspace_tools_return_typed_structured_output() -> None:
     )
 
     assert snapshot.is_error is False
-    assert snapshot.structured_content["profile_ready"] is True
-    assert snapshot.structured_content["setup_actions"] == ["initialize_rubric"]
-    assert profile.structured_content["id"] == "default"
-    assert preview.structured_content["kind"] == "profile_claims"
-    assert preview.structured_content["candidates"][0]["id"] == "claim-1"
+    assert snapshot.structured_content == {"status": "ok"}
+    assert snapshot.meta["aiDreamJobEngine"]["payload"]["profile_ready"] is True
+    assert snapshot.meta["aiDreamJobEngine"]["payload"]["setup_actions"] == ["initialize_rubric"]
+    assert profile.meta["aiDreamJobEngine"]["payload"]["id"] == "default"
+    assert preview.meta["aiDreamJobEngine"]["payload"]["kind"] == "profile_claims"
+    assert preview.meta["aiDreamJobEngine"]["payload"]["candidates"][0]["id"] == "claim-1"
 
 
 @pytest.mark.asyncio

@@ -16,6 +16,7 @@ import { EvidenceView } from "./components/EvidenceView";
 import { RubricView } from "./components/RubricView";
 import {
   isWorkspaceAppPayload,
+  privatePayload,
   type JobReviewStatus,
   type WorkspaceAppPayload,
   type WorkspaceJobDetail,
@@ -62,9 +63,10 @@ export function App({ bridge: providedBridge }: AppProps) {
       if (!mounted || result.isError) {
         return;
       }
-      if (isWorkspaceAppPayload(result.structuredContent)) {
-        setPayload(result.structuredContent);
-        setActiveView(result.structuredContent.view === "jobs" ? "jobs" : "evidence");
+      const initialPayload = privatePayload(result);
+      if (isWorkspaceAppPayload(initialPayload)) {
+        setPayload(initialPayload);
+        setActiveView(initialPayload.view === "jobs" ? "jobs" : "evidence");
       }
     });
 
@@ -418,11 +420,16 @@ function JobWorkspace({
     return <div className="state-message">尚无已分析岗位</div>;
   }
 
+  const serverStaleIds = new Set(
+    jobs.filter((job) => (job.stale_reasons?.length ?? 0) > 0).map((job) => job.analysis_id),
+  );
+  const effectiveStaleIds = new Set([...staleJobIds, ...serverStaleIds]);
+
   return (
     <div className="job-workspace-stack">
-      {staleJobIds.size > 0 && (
+      {effectiveStaleIds.size > 0 && (
         <p className="stale-warning" role="status">
-          标准已更改：{staleJobIds.size} 个岗位仍显示旧结果
+          证据或标准已更改：{effectiveStaleIds.size} 个岗位需要重新计算
         </p>
       )}
       <div className="job-workspace">
@@ -451,7 +458,7 @@ function JobWorkspace({
           </div>
         ) : detail ? (
           <>
-            {staleJobIds.has(detail.summary.analysis_id) && (
+            {effectiveStaleIds.has(detail.summary.analysis_id) && (
               <p className="stale-detail-warning">
                 此岗位结果基于旧标准，请先重新计算。
               </p>

@@ -15,6 +15,7 @@ from ai_dream_job_engine.mcp_server import (
     _default_database_path,
     build_server,
 )
+from ai_dream_job_engine.database import LocalStore
 from ai_dream_job_engine.models import (
     AnalysisRecord,
     CandidateClaim,
@@ -59,6 +60,32 @@ class MemoryStore:
 
     def list_analyses(self):
         return list(self.analyses)
+
+
+class BarrierRubricStore(LocalStore):
+    def __init__(self, path, barrier):
+        super().__init__(path)
+        self._barrier = barrier
+        self._first_cas = True
+
+    def compare_and_swap_rubric(self, rubric, expected_storage_revision):
+        if self._first_cas:
+            self._first_cas = False
+            self._barrier.wait(timeout=5)
+        return super().compare_and_swap_rubric(rubric, expected_storage_revision)
+
+
+class BarrierProfileStore(LocalStore):
+    def __init__(self, path, barrier):
+        super().__init__(path)
+        self._barrier = barrier
+        self._first_cas = True
+
+    def compare_and_swap_profile(self, profile, expected_storage_revision):
+        if self._first_cas:
+            self._first_cas = False
+            self._barrier.wait(timeout=5)
+        return super().compare_and_swap_profile(profile, expected_storage_revision)
 
 
 class StaticRubricService:
@@ -167,7 +194,10 @@ async def test_mcp_profile_claims_require_server_preview_and_per_claim_decisions
         },
     )
 
-    assert any(item["confirmed"] for item in confirmed.structured_content["claims"])
+    assert confirmed.structured_content == {"status": "ok"}
+    private_profile = confirmed.meta["aiDreamJobEngine"]["payload"]
+    assert any(item["confirmed"] for item in private_profile["claims"])
+    assert "Python" not in str(confirmed.structured_content)
 
 
 def test_profile_confirmation_persists_only_confirmed_mixed_decisions() -> None:
@@ -267,6 +297,121 @@ def test_memory_preview_is_server_issued_exact_and_single_use() -> None:
             first.preview_id,
             [ClaimDecision(claim_id="memory-1", action="accept")],
         )
+
+
+def test_two_profile_applications_merge_distinct_confirmations(tmp_path) -> None:
+    path = tmp_path / "shared.sqlite3"
+    barrier = threading.Barrier(2)
+    first_store = BarrierProfileStore(path, barrier)
+    second_store = BarrierProfileStore(path, barrier)
+    first_store.initialize()
+    first_store.save_profile(CandidateProfile())
+    first = LocalProfileApplication(first_store)
+    second = LocalProfileApplication(second_store)
+    first_preview = first.review_profile_claims(
+        [_resume_candidate("claim-a", "skill", "Python")]
+    )
+    second_preview = second.review_profile_claims(
+        [_resume_candidate("claim-b", "location", "Remote")]
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_future = pool.submit(
+            first.confirm_profile_claims,
+            first_preview.preview_id,
+            [ClaimDecision(claim_id="claim-a", action="accept")],
+        )
+        second_future = pool.submit(
+            second.confirm_profile_claims,
+            second_preview.preview_id,
+            [ClaimDecision(claim_id="claim-b", action="accept")],
+        )
+        first_future.result(timeout=5)
+        second_future.result(timeout=5)
+
+    loaded = first_store.load_profile()
+    assert loaded is not None
+    assert {(claim.claim_type, claim.value) for claim in loaded.claims} == {
+        ("skill", "Python"),
+        ("location", "Remote"),
+    }
+    assert loaded.storage_revision == 2
+
+
+def test_two_rubric_applications_merge_distinct_patches(tmp_path) -> None:
+    path = tmp_path / "shared.sqlite3"
+    barrier = threading.Barrier(2)
+    first_store = BarrierRubricStore(path, barrier)
+    second_store = BarrierRubricStore(path, barrier)
+    first_store.initialize()
+    rubric = load_default_rubric()
+    first_store.save_rubric(rubric)
+    first = LocalRubricApplication(first_store)
+    second = LocalRubricApplication(second_store)
+    fact_id = rubric.facts[0].id
+    dimension_id = rubric.dimensions[0].id
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_future = pool.submit(
+            first.update_rubric,
+            RubricPatch(fact_updates={fact_id: {"name": "Updated fact"}}),
+        )
+        second_future = pool.submit(
+            second.update_rubric,
+            RubricPatch(
+                dimension_updates={dimension_id: {"definition": "Updated dimension"}}
+            ),
+        )
+        first_future.result(timeout=5)
+        second_future.result(timeout=5)
+
+    loaded = first_store.load_rubric()
+    assert loaded is not None
+    assert next(item for item in loaded.facts if item.id == fact_id).name == "Updated fact"
+    assert next(
+        item for item in loaded.dimensions if item.id == dimension_id
+    ).definition == "Updated dimension"
+    assert loaded.storage_revision == 2
+
+
+def test_two_rubric_applications_reject_overlapping_concurrent_patches(
+    tmp_path,
+) -> None:
+    path = tmp_path / "shared.sqlite3"
+    barrier = threading.Barrier(2)
+    first_store = BarrierRubricStore(path, barrier)
+    second_store = BarrierRubricStore(path, barrier)
+    first_store.initialize()
+    rubric = load_default_rubric()
+    first_store.save_rubric(rubric)
+    fact_id = rubric.facts[0].id
+    applications = (
+        LocalRubricApplication(first_store),
+        LocalRubricApplication(second_store),
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(
+                application.update_rubric,
+                RubricPatch(fact_updates={fact_id: {"name": name}}),
+            )
+            for application, name in zip(applications, ("First", "Second"), strict=True)
+        ]
+        outcomes = []
+        for future in futures:
+            try:
+                outcomes.append(future.result(timeout=5))
+            except ApplicationError as error:
+                outcomes.append(error)
+
+    assert sum(isinstance(item, Rubric) for item in outcomes) == 1
+    conflicts = [item for item in outcomes if isinstance(item, ApplicationError)]
+    assert len(conflicts) == 1
+    assert conflicts[0].code == "rubric_update_conflict"
+    loaded = first_store.load_rubric()
+    assert loaded is not None
+    assert loaded.storage_revision == 1
 
 
 def test_memory_confirmation_rejects_forged_and_stale_preview_ids() -> None:

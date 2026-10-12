@@ -54,7 +54,13 @@ export interface CandidateProfile {
   id: string;
   claims: CandidateClaim[];
   import_receipts: Array<Record<string, unknown>>;
+  memory_connections?: Array<{
+    source_agent: string;
+    scope: string[];
+    connected: boolean;
+  }>;
   version: string;
+  storage_revision?: number;
   updated_at: string;
 }
 
@@ -135,6 +141,12 @@ export interface WorkspaceJobSummary {
   review_status: JobReviewStatus;
   created_at: string;
   can_mark_ready_to_apply: boolean;
+  stale_reasons?: Array<
+    | "profile_missing"
+    | "rubric_missing"
+    | "profile_changed"
+    | "rubric_changed"
+  >;
 }
 
 export interface DecisionContribution {
@@ -159,6 +171,7 @@ export interface WorkspaceJobDetail {
 export interface ReadyToApplyBlocker {
   code:
     | "recommendation_not_priority"
+    | "stale_analysis"
     | "hard_blocker"
     | "unresolved_evidence_gap";
   message: string;
@@ -197,7 +210,16 @@ export interface WorkspaceAppPayload {
 
 export interface ToolResultEnvelope {
   structuredContent?: unknown;
+  _meta?: Record<string, unknown>;
   isError?: boolean;
+}
+
+export function privatePayload(value: ToolResultEnvelope): unknown {
+  const namespace = value._meta?.aiDreamJobEngine;
+  if (namespace && typeof namespace === "object" && "payload" in namespace) {
+    return (namespace as { payload: unknown }).payload;
+  }
+  return value.structuredContent;
 }
 
 export function isWorkspaceAppPayload(value: unknown): value is WorkspaceAppPayload {

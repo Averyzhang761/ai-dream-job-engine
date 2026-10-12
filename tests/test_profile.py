@@ -14,6 +14,7 @@ from ai_dream_job_engine.profile import (
     confirm_claims,
     disconnect_memory_source,
     preview_memory_import,
+    profile_with_memory_connection,
     propose_resume_claims,
 )
 
@@ -88,6 +89,29 @@ def test_memory_import_is_preview_only() -> None:
     assert preview.added_claim_ids == ["memory-1"]
     assert profile.model_dump() == profile_before
     assert candidate.model_dump() == candidate_before
+
+
+def test_memory_preview_records_connection_and_disconnect_preserves_claims() -> None:
+    profile = CandidateProfile()
+    candidate = memory_claim("memory-1", "preferred_role", "Applied AI PM")
+    preview = preview_memory_import(
+        profile,
+        source_agent="career-agent",
+        scope=["preferences"],
+        candidates=[candidate],
+    )
+    connected = profile_with_memory_connection(profile, preview)
+    confirmed = confirm_claims(
+        connected,
+        [ClaimDecision(claim_id="memory-1", action="accept")],
+        preview=preview,
+    )
+
+    disconnected = disconnect_memory_source(confirmed, "career-agent", False)
+
+    assert any(claim.confirmed for claim in disconnected.claims)
+    assert disconnected.memory_connections[0].source_agent == "career-agent"
+    assert disconnected.memory_connections[0].connected is False
 
 
 def test_previewed_candidate_can_be_confirmed_and_unknown_ids_are_rejected() -> None:

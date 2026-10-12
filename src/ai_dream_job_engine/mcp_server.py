@@ -14,11 +14,13 @@ from typing import Annotated, Callable, Protocol
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import CallToolResult, TextContent
 from pydantic import BaseModel, Field
 
 from ai_dream_job_engine.database import LocalStore
 from ai_dream_job_engine.mcp_app import (
     MCP_APP_MIME_TYPE,
+    PRIVATE_PAYLOAD_META_KEY,
     UI_RESOURCE_META,
     WORKSPACE_RESOURCE_URI,
     WorkspaceAppPayload,
@@ -45,6 +47,7 @@ from ai_dream_job_engine.profile import (
     confirm_claims,
     disconnect_memory_source,
     preview_memory_import,
+    profile_with_memory_connection,
 )
 from ai_dream_job_engine.providers.base import ProviderError
 from ai_dream_job_engine.providers.jev import JevSignalProvider
@@ -97,6 +100,10 @@ INVALID_CLAIM_DECISIONS = (
 INVALID_RUBRIC_PATCH = (
     "invalid_rubric_patch",
     "Review the rubric patch and submit valid rubric changes.",
+)
+RUBRIC_UPDATE_CONFLICT = (
+    "rubric_update_conflict",
+    "The same rubric fields changed concurrently; reload and retry your changes.",
 )
 STORAGE_FAILURE = (
     "storage_failure",
@@ -270,11 +277,25 @@ class _LazyLocalStore:
     def save_profile(self, profile: CandidateProfile) -> None:
         self._ready().save_profile(profile)
 
+    def compare_and_swap_profile(
+        self, profile: CandidateProfile, expected_storage_revision: int
+    ) -> bool:
+        return self._ready().compare_and_swap_profile(
+            profile, expected_storage_revision
+        )
+
     def load_profile(self) -> CandidateProfile | None:
         return self._ready().load_profile()
 
     def save_rubric(self, rubric: Rubric) -> None:
         self._ready().save_rubric(rubric)
+
+    def compare_and_swap_rubric(
+        self, rubric: Rubric, expected_storage_revision: int
+    ) -> bool:
+        return self._ready().compare_and_swap_rubric(
+            rubric, expected_storage_revision
+        )
 
     def load_rubric(self) -> Rubric | None:
         return self._ready().load_rubric()
@@ -415,35 +436,32 @@ class LocalProfileApplication:
             issued = self._profile_previews.get(preview_id)
             if issued is None:
                 raise ApplicationError(PROFILE_PREVIEW_INVALID)
-            profile = self._profile()
-            if (
-                _model_digest(profile) != issued.profile_digest
-                or _profile_preview_digest(profile, issued.candidates)
-                != issued.binding_digest
-                or {item.claim_id for item in decisions}
-                != {item.id for item in issued.candidates}
-            ):
+            if {item.claim_id for item in decisions} != {
+                item.id for item in issued.candidates
+            }:
                 raise ApplicationError(PROFILE_PREVIEW_INVALID)
-            try:
-                staged = profile.model_copy(
-                    update={"claims": [*profile.claims, *issued.candidates]},
-                    deep=True,
-                )
-                confirmed = confirm_claims(staged, decisions)
-                proposal_ids = {item.id for item in issued.candidates}
-                updated = confirmed.model_copy(
-                    update={
-                        "claims": [
-                            claim
-                            for claim in confirmed.claims
-                            if claim.id not in proposal_ids
-                        ]
-                    },
-                    deep=True,
-                )
-            except ValueError:
-                raise ApplicationError(INVALID_CLAIM_DECISIONS) from None
-            self._save_profile(updated)
+            def apply(latest: CandidateProfile) -> CandidateProfile:
+                try:
+                    staged = latest.model_copy(
+                        update={"claims": [*latest.claims, *issued.candidates]},
+                        deep=True,
+                    )
+                    confirmed = confirm_claims(staged, decisions)
+                    proposal_ids = {item.id for item in issued.candidates}
+                    return confirmed.model_copy(
+                        update={
+                            "claims": [
+                                claim
+                                for claim in confirmed.claims
+                                if claim.id not in proposal_ids
+                            ]
+                        },
+                        deep=True,
+                    )
+                except ValueError:
+                    raise ApplicationError(INVALID_CLAIM_DECISIONS) from None
+
+            updated = self._update_profile(apply)
             del self._profile_previews[preview_id]
             return updated
 
@@ -460,11 +478,18 @@ class LocalProfileApplication:
                 or any(not item.strip() for item in scope)
             ):
                 raise ApplicationError(MEMORY_PREVIEW_INVALID)
-            profile = self._profile()
+            def connect(latest: CandidateProfile) -> CandidateProfile:
+                try:
+                    preview = preview_memory_import(
+                        latest, source_agent, scope, candidates
+                    )
+                    return profile_with_memory_connection(latest, preview)
+                except ValueError:
+                    raise ApplicationError(MEMORY_PREVIEW_INVALID) from None
+
+            profile = self._update_profile(connect)
             try:
-                preview = preview_memory_import(
-                    profile, source_agent, scope, candidates
-                )
+                preview = preview_memory_import(profile, source_agent, scope, candidates)
             except ValueError:
                 raise ApplicationError(MEMORY_PREVIEW_INVALID) from None
             preview_id = self._new_preview_id(_MEMORY_PREVIEW_PREFIX)
@@ -490,30 +515,19 @@ class LocalProfileApplication:
             issued = self._previews.get(preview_id)
             if issued is None:
                 raise ApplicationError(MEMORY_PREVIEW_INVALID)
-            profile = self._profile()
-            if _model_digest(profile) != issued.profile_digest:
-                raise ApplicationError(MEMORY_PREVIEW_INVALID)
-            try:
-                reproduced = preview_memory_import(
-                    profile,
-                    issued.preview.source_agent,
-                    issued.preview.scope,
-                    issued.preview.candidates,
-                )
-            except ValueError:
-                raise ApplicationError(MEMORY_PREVIEW_INVALID) from None
-            if (
-                _preview_binding_digest(profile, reproduced)
-                != issued.binding_digest
-            ):
-                raise ApplicationError(MEMORY_PREVIEW_INVALID)
-            try:
-                updated = confirm_claims(
-                    profile, decisions, preview=issued.preview
-                )
-            except ValueError:
-                raise ApplicationError(INVALID_CLAIM_DECISIONS) from None
-            self._save_profile(updated)
+            def apply(latest: CandidateProfile) -> CandidateProfile:
+                try:
+                    reproduced = preview_memory_import(
+                        latest,
+                        issued.preview.source_agent,
+                        issued.preview.scope,
+                        issued.preview.candidates,
+                    )
+                    return confirm_claims(latest, decisions, preview=reproduced)
+                except ValueError:
+                    raise ApplicationError(INVALID_CLAIM_DECISIONS) from None
+
+            updated = self._update_profile(apply)
             del self._previews[preview_id]
             return updated
 
@@ -521,13 +535,15 @@ class LocalProfileApplication:
         self, source_agent: str, delete_imported: bool
     ) -> CandidateProfile:
         with self._lock:
-            try:
-                updated = disconnect_memory_source(
-                    self._profile(), source_agent, delete_imported
-                )
-            except ValueError:
-                raise ApplicationError(INVALID_CLAIM_DECISIONS) from None
-            self._save_profile(updated)
+            def disconnect(latest: CandidateProfile) -> CandidateProfile:
+                try:
+                    return disconnect_memory_source(
+                        latest, source_agent, delete_imported
+                    )
+                except ValueError:
+                    raise ApplicationError(INVALID_CLAIM_DECISIONS) from None
+
+            updated = self._update_profile(disconnect)
             return updated
 
     def _profile(self) -> CandidateProfile:
@@ -544,6 +560,27 @@ class LocalProfileApplication:
             self._store.save_profile(profile)
         except Exception:
             raise ApplicationError(STORAGE_FAILURE) from None
+
+    def _update_profile(self, operation) -> CandidateProfile:
+        while True:
+            current = self._profile()
+            updated = operation(current).model_copy(
+                update={"storage_revision": current.storage_revision + 1},
+                deep=True,
+            )
+            try:
+                compare_and_swap = getattr(
+                    self._store, "compare_and_swap_profile", None
+                )
+                if compare_and_swap is None:
+                    self._store.save_profile(updated)
+                    saved = True
+                else:
+                    saved = compare_and_swap(updated, current.storage_revision)
+            except Exception:
+                raise ApplicationError(STORAGE_FAILURE) from None
+            if saved:
+                return updated
 
     def _new_preview_id(self, prefix: str) -> str:
         while True:
@@ -566,12 +603,34 @@ class LocalRubricApplication:
 
     def update_rubric(self, patch: RubricPatch) -> Rubric:
         with self._lock:
-            try:
-                updated = apply_rubric_patch(self._get_rubric(), patch)
-            except ValueError:
-                raise ApplicationError(INVALID_RUBRIC_PATCH) from None
-            self._save_rubric(updated)
-            return updated
+            base: Rubric | None = None
+            while True:
+                current = self._get_rubric()
+                if base is None:
+                    base = current
+                elif _rubric_patch_conflicts(base, current, patch):
+                    raise ApplicationError(RUBRIC_UPDATE_CONFLICT)
+                try:
+                    updated = apply_rubric_patch(current, patch).model_copy(
+                        update={"storage_revision": current.storage_revision + 1}
+                    )
+                except ValueError:
+                    raise ApplicationError(INVALID_RUBRIC_PATCH) from None
+                try:
+                    compare_and_swap = getattr(
+                        self._store, "compare_and_swap_rubric", None
+                    )
+                    if compare_and_swap is None:
+                        self._store.save_rubric(updated)
+                        saved = True
+                    else:
+                        saved = compare_and_swap(
+                            updated, current.storage_revision
+                        )
+                    if saved:
+                        return updated
+                except Exception:
+                    raise ApplicationError(STORAGE_FAILURE) from None
 
     def _get_rubric(self) -> Rubric:
         try:
@@ -588,6 +647,37 @@ class LocalRubricApplication:
             self._store.save_rubric(rubric)
         except Exception:
             raise ApplicationError(STORAGE_FAILURE) from None
+
+
+def _rubric_patch_conflicts(
+    base: Rubric, current: Rubric, patch: RubricPatch
+) -> bool:
+    for collection_name, updates in (
+        ("facts", patch.fact_updates),
+        ("dimensions", patch.dimension_updates),
+        ("questions", patch.question_updates),
+    ):
+        base_items = {
+            item.id: item.model_dump(mode="python")
+            for item in getattr(base, collection_name)
+        }
+        current_items = {
+            item.id: item.model_dump(mode="python")
+            for item in getattr(current, collection_name)
+        }
+        for item_id, changes in updates.items():
+            if item_id not in base_items or item_id not in current_items:
+                if base_items.get(item_id) != current_items.get(item_id):
+                    return True
+                continue
+            for field in changes:
+                if base_items[item_id].get(field) != current_items[item_id].get(field):
+                    return True
+    return any(
+        base.recommendation_thresholds.get(level)
+        != current.recommendation_thresholds.get(level)
+        for level in patch.threshold_updates
+    )
 
 
 class ConfiguredAnalysisApplication:
@@ -800,6 +890,19 @@ def _call_safely(operation):
         ) from None
 
 
+def _private_app_result(payload, *, summary: dict | None = None) -> CallToolResult:
+    private_payload = (
+        payload.model_dump(mode="json")
+        if isinstance(payload, BaseModel)
+        else payload
+    )
+    return CallToolResult(
+        content=[TextContent(type="text", text="Local app data is ready.")],
+        structured_content=summary or {"status": "ok"},
+        meta={PRIVATE_PAYLOAD_META_KEY: {"payload": private_payload}},
+    )
+
+
 def build_server(services: MCPServices | None = None) -> MCPServer:
     applications = services or default_services()
     server = MCPServer(
@@ -821,23 +924,49 @@ def build_server(services: MCPServices | None = None) -> MCPServer:
 
     @server.tool(
         meta={
-            "ui": {"resourceUri": WORKSPACE_RESOURCE_URI},
+            "ui": {
+                "resourceUri": WORKSPACE_RESOURCE_URI,
+                "visibility": ["model", "app"],
+            },
             "openai/ui": {"entrypoints": [{"type": "thread"}]},
-        }
+        },
+        structured_output=False,
     )
-    def open_job_workspace() -> WorkspaceAppPayload:
+    def open_job_workspace() -> CallToolResult:
         """Open the local workspace with server-owned initial job data."""
-        return _call_safely(
+        payload = _call_safely(
             lambda: build_job_workspace_payload(applications.workspace)
         )
+        return _private_app_result(
+            payload,
+            summary={
+                "status": "ok",
+                "view": "jobs",
+                "profile_ready": payload.snapshot.profile_ready,
+                "rubric_ready": payload.snapshot.rubric_ready,
+                "job_count": len(payload.snapshot.jobs),
+            },
+        )
 
-    @server.tool(meta={"ui": {"resourceUri": WORKSPACE_RESOURCE_URI}})
-    def open_claim_review(preview_id: NonEmptyString) -> WorkspaceAppPayload:
+    @server.tool(
+        meta={
+            "ui": {
+                "resourceUri": WORKSPACE_RESOURCE_URI,
+                "visibility": ["model", "app"],
+            }
+        },
+        structured_output=False,
+    )
+    def open_claim_review(preview_id: NonEmptyString) -> CallToolResult:
         """Open one immutable server-issued claim preview in the workspace."""
-        return _call_safely(
+        payload = _call_safely(
             lambda: build_claim_review_payload(
                 applications.workspace, preview_id
             )
+        )
+        return _private_app_result(
+            payload,
+            summary={"status": "ok", "view": "claim_review"},
         )
 
     @server.tool()
@@ -858,17 +987,17 @@ def build_server(services: MCPServices | None = None) -> MCPServer:
             lambda: applications.profile.review_profile_claims(proposals)
         )
 
-    @server.tool()
+    @server.tool(meta={"ui": {"visibility": ["app"]}}, structured_output=False)
     def confirm_profile_claims(
         preview_id: NonEmptyString,
         decisions: list[ClaimDecision],
-    ) -> CandidateProfile:
+    ) -> CallToolResult:
         """Apply a complete set of explicit per-claim resume decisions."""
-        return _call_safely(
+        return _private_app_result(_call_safely(
             lambda: applications.profile.confirm_profile_claims(
                 preview_id, decisions
             ),
-        )
+        ))
 
     @server.tool()
     def preview_agent_memory_import(
@@ -883,41 +1012,41 @@ def build_server(services: MCPServices | None = None) -> MCPServer:
             ),
         )
 
-    @server.tool()
+    @server.tool(meta={"ui": {"visibility": ["app"]}}, structured_output=False)
     def confirm_agent_memory_import(
         preview_id: NonEmptyString,
         decisions: list[ClaimDecision],
-    ) -> CandidateProfile:
+    ) -> CallToolResult:
         """Apply a complete set of explicit per-claim memory decisions."""
-        return _call_safely(
+        return _private_app_result(_call_safely(
             lambda: applications.profile.confirm_agent_memory_import(
                 preview_id, decisions
             ),
-        )
+        ))
 
-    @server.tool()
+    @server.tool(meta={"ui": {"visibility": ["app"]}}, structured_output=False)
     def disconnect_agent_memory(
         source_agent: NonEmptyString,
         delete_imported: bool,
-    ) -> CandidateProfile:
+    ) -> CallToolResult:
         """Disconnect a source and optionally delete its confirmed imports."""
-        return _call_safely(
+        return _private_app_result(_call_safely(
             lambda: applications.profile.disconnect_agent_memory(
                 source_agent, delete_imported
             ),
-        )
+        ))
 
-    @server.tool()
-    def get_rubric() -> Rubric:
+    @server.tool(meta={"ui": {"visibility": ["app"]}}, structured_output=False)
+    def get_rubric() -> CallToolResult:
         """Return the active local decision rubric."""
-        return _call_safely(applications.rubric.get_rubric)
+        return _private_app_result(_call_safely(applications.rubric.get_rubric))
 
-    @server.tool()
-    def update_rubric(patch: RubricPatch) -> Rubric:
+    @server.tool(meta={"ui": {"visibility": ["app"]}}, structured_output=False)
+    def update_rubric(patch: RubricPatch) -> CallToolResult:
         """Apply a validated declarative patch to the active rubric."""
-        return _call_safely(
+        return _private_app_result(_call_safely(
             lambda: applications.rubric.update_rubric(patch)
-        )
+        ))
 
     @server.tool()
     def analyze_job(job_description: NonEmptyString) -> AnalysisRecord:
@@ -945,41 +1074,41 @@ def build_server(services: MCPServices | None = None) -> MCPServer:
         """List structured summaries of successful local analyses."""
         return _call_safely(applications.analysis.list_analyzed_jobs)
 
-    @server.tool()
-    def get_workspace_snapshot() -> WorkspaceSnapshot:
+    @server.tool(meta={"ui": {"visibility": ["app"]}}, structured_output=False)
+    def get_workspace_snapshot() -> CallToolResult:
         """Return setup state, confirmed claims, and reviewed job summaries."""
-        return _call_safely(
+        return _private_app_result(_call_safely(
             lambda: applications.workspace.get_snapshot()
-        )
+        ))
 
-    @server.tool()
-    def get_workspace_job(analysis_id: NonEmptyString) -> WorkspaceJobDetail:
+    @server.tool(meta={"ui": {"visibility": ["app"]}}, structured_output=False)
+    def get_workspace_job(analysis_id: NonEmptyString) -> CallToolResult:
         """Return one integrity-valid decision with grouped gaps and evidence."""
-        return _call_safely(
+        return _private_app_result(_call_safely(
             lambda: applications.workspace.get_job_detail(analysis_id)
-        )
+        ))
 
-    @server.tool()
+    @server.tool(meta={"ui": {"visibility": ["app"]}}, structured_output=False)
     def set_job_review_status(
         analysis_id: NonEmptyString,
         status: JobReviewStatus,
-    ) -> WorkspaceJobDetail:
+    ) -> CallToolResult:
         """Persist an explicit review status after server-side eligibility checks."""
-        return _call_safely(
+        return _private_app_result(_call_safely(
             lambda: applications.workspace.set_review_status(analysis_id, status)
-        )
+        ))
 
-    @server.tool()
-    def get_candidate_profile() -> CandidateProfile:
+    @server.tool(meta={"ui": {"visibility": ["app"]}}, structured_output=False)
+    def get_candidate_profile() -> CallToolResult:
         """Return the active local candidate profile."""
-        return _call_safely(applications.workspace.get_profile)
+        return _private_app_result(_call_safely(applications.workspace.get_profile))
 
-    @server.tool()
-    def get_claim_preview(preview_id: NonEmptyString) -> ClaimPreviewView:
+    @server.tool(meta={"ui": {"visibility": ["app"]}}, structured_output=False)
+    def get_claim_preview(preview_id: NonEmptyString) -> CallToolResult:
         """Return an immutable view of a server-issued claim preview."""
-        return _call_safely(
+        return _private_app_result(_call_safely(
             lambda: applications.workspace.get_claim_preview(preview_id)
-        )
+        ))
 
     return server
 

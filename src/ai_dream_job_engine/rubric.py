@@ -53,6 +53,7 @@ def apply_rubric_patch(rubric: Rubric, patch: RubricPatch) -> Rubric:
     updated = Rubric(
         id=rubric.id,
         version=rubric.version,
+        storage_revision=rubric.storage_revision,
         facts=facts,
         dimensions=dimensions,
         questions=questions,
@@ -65,7 +66,9 @@ def apply_rubric_patch(rubric: Rubric, patch: RubricPatch) -> Rubric:
 
 def rubric_revision(rubric: Rubric) -> str:
     """Return the immutable digest of the rubric's semantic content."""
-    payload = rubric.model_dump(mode="json", exclude={"revision"})
+    payload = rubric.model_dump(
+        mode="json", exclude={"revision", "storage_revision"}
+    )
     encoded = json.dumps(
         payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
     ).encode()

@@ -131,8 +131,10 @@ export function EvidenceView({
   }, [initialClaims, profile]);
 
   const memorySources = useMemo(
-    () => Array.from(new Set(groups.agent.map((claim) => claim.import_origin?.source_agent ?? claim.source_agent).filter((source): source is string => Boolean(source)))),
-    [groups.agent],
+    () => (profile?.memory_connections ?? [])
+      .filter((connection) => connection.connected)
+      .map((connection) => connection.source_agent),
+    [profile],
   );
 
   const askAgent = async (regenerate = false) => {

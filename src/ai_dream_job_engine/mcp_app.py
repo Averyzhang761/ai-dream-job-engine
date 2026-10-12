@@ -12,6 +12,7 @@ from ai_dream_job_engine.models import ClaimPreviewView, WorkspaceSnapshot
 
 WORKSPACE_RESOURCE_URI = "ui://ai-dream-job-engine/workspace-v1.html"
 MCP_APP_MIME_TYPE = "text/html;profile=mcp-app"
+PRIVATE_PAYLOAD_META_KEY = "aiDreamJobEngine"
 UI_RESOURCE_META = {
     "ui": {
         "csp": {

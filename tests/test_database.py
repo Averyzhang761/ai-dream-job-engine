@@ -128,6 +128,40 @@ def test_rubric_round_trip_preserves_version(tmp_path) -> None:
     assert loaded.version == "ai-job-v7"
 
 
+def test_profile_compare_and_swap_rejects_stale_writer_across_stores(tmp_path) -> None:
+    path = tmp_path / "store.sqlite3"
+    first = LocalStore.open(path)
+    second = LocalStore.open(path)
+    first.initialize()
+    first.save_profile(CandidateProfile())
+    original = first.load_profile()
+    assert original is not None
+
+    winner = original.model_copy(update={"storage_revision": 1})
+    loser = original.model_copy(update={"storage_revision": 1})
+
+    assert first.compare_and_swap_profile(winner, expected_storage_revision=0)
+    assert not second.compare_and_swap_profile(loser, expected_storage_revision=0)
+    assert second.load_profile().storage_revision == 1
+
+
+def test_rubric_compare_and_swap_rejects_stale_writer_across_stores(tmp_path) -> None:
+    path = tmp_path / "store.sqlite3"
+    first = LocalStore.open(path)
+    second = LocalStore.open(path)
+    first.initialize()
+    first.save_rubric(Rubric(version="ai-job-v1"))
+    original = first.load_rubric()
+    assert original is not None
+
+    winner = original.model_copy(update={"storage_revision": 1})
+    loser = original.model_copy(update={"storage_revision": 1})
+
+    assert first.compare_and_swap_rubric(winner, expected_storage_revision=0)
+    assert not second.compare_and_swap_rubric(loser, expected_storage_revision=0)
+    assert second.load_rubric().storage_revision == 1
+
+
 def test_version_one_database_migrates_to_review_state_schema(tmp_path) -> None:
     database_path = tmp_path / "store.sqlite3"
     profile = CandidateProfile()

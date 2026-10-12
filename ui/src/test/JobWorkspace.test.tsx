@@ -140,7 +140,11 @@ function bridgeWithPayload(
   let listener: ((result: ToolResultEnvelope) => void) | undefined;
   return {
     initialize: async () => {
-      queueMicrotask(() => listener?.({ structuredContent: initialPayload, isError: false }));
+      queueMicrotask(() => listener?.({
+        structuredContent: { status: "ok" },
+        _meta: { aiDreamJobEngine: { payload: initialPayload } },
+        isError: false,
+      }));
     },
     callTool: async <T,>(name: string, args: object) =>
       (await toolImpl(name, args)) as T,
@@ -409,7 +413,7 @@ describe("job workspace", () => {
     expect(await screen.findByText(/2 个岗位需要重新计算/)).toBeVisible();
 
     await user.click(screen.getByRole("tab", { name: "岗位" }));
-    expect(await screen.findByText("标准已更改：2 个岗位仍显示旧结果")).toBeVisible();
+    expect(await screen.findByText("证据或标准已更改：2 个岗位需要重新计算")).toBeVisible();
     expect(screen.getByText("此岗位结果基于旧标准，请先重新计算。" )).toBeVisible();
 
     await user.click(screen.getByRole("tab", { name: "我的标准" }));
@@ -417,7 +421,7 @@ describe("job workspace", () => {
     expect(await screen.findByText(/1 个岗位需要重新计算/)).toBeVisible();
 
     await user.click(screen.getByRole("tab", { name: "岗位" }));
-    expect(await screen.findByText("标准已更改：1 个岗位仍显示旧结果")).toBeVisible();
+    expect(await screen.findByText("证据或标准已更改：1 个岗位需要重新计算")).toBeVisible();
     expect(screen.queryByText("此岗位结果基于旧标准，请先重新计算。" )).not.toBeInTheDocument();
     expect(calls).toContainEqual({ name: "recompute_decision", args: { analysis_id: "first" } });
   });
