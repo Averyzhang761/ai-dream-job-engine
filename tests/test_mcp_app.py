@@ -87,6 +87,15 @@ async def test_private_ui_tools_are_app_only_and_return_payload_in_meta() -> Non
 
 
 @pytest.mark.asyncio
+async def test_preview_orchestration_tools_keep_private_payload_in_app_meta() -> None:
+    tools = {tool.name: tool for tool in await _server().list_tools()}
+
+    for name in ("review_profile_claims", "preview_agent_memory_import"):
+        assert tools[name].meta["ui"]["visibility"] == ["model", "app"]
+        assert tools[name].output_schema is None
+
+
+@pytest.mark.asyncio
 async def test_open_workspace_tool_links_only_to_workspace_resource() -> None:
     server = _server()
     tools = {item.name: item for item in await server.list_tools()}

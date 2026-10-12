@@ -31,6 +31,7 @@ ANALYSIS_NOT_FOUND = (
     "analysis_not_found",
     "Analysis was not found; choose a successful analysis ID.",
 )
+FULL_JD_NOT_PERSISTED = "完整 JD 原文未持久化，请重新打开来源核对"
 ANALYSIS_UNAVAILABLE = (
     "analysis_unavailable",
     "Analysis is unavailable; choose a successful integrity-valid analysis.",
@@ -165,7 +166,9 @@ class WorkspaceApplication:
                 _resolve_evidence(item, evidence)
                 for item in result.qualification_contributions
             ],
-            trace_evidence=[evidence.get(item, item) for item in trace.evidence],
+            trace_evidence=[
+                _resolve_evidence_ref(item, evidence) for item in trace.evidence
+            ],
             ready_to_apply_blockers=_ready_to_apply_blockers(
                 record, stale_reasons
             ),
@@ -372,10 +375,22 @@ def _text_fact(record: AnalysisRecord, *fact_ids: str) -> str | None:
 def _resolve_evidence(item, catalog: dict[str, str]):
     return item.model_copy(
         update={
-            "job_evidence": [catalog.get(value, value) for value in item.job_evidence],
+            "job_evidence": [
+                _resolve_evidence_ref(value, catalog)
+                for value in item.job_evidence
+            ],
             "candidate_evidence": [
                 catalog.get(value, value) for value in item.candidate_evidence
             ],
         },
         deep=True,
     )
+
+
+def _resolve_evidence_ref(value: str, catalog: dict[str, str]) -> str:
+    resolved = catalog.get(value)
+    if resolved is not None:
+        return resolved
+    if value.startswith("jd-evidence:v1:"):
+        return FULL_JD_NOT_PERSISTED
+    return value

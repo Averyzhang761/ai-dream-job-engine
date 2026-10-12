@@ -76,15 +76,34 @@ class BarrierRubricStore(LocalStore):
 
 
 class BarrierProfileStore(LocalStore):
-    def __init__(self, path, barrier):
+    def __init__(self, path, barrier, disconnect_written=None):
         super().__init__(path)
         self._barrier = barrier
+        self._disconnect_written = disconnect_written
         self._first_cas = True
+        self._armed = False
+        self._prefer_disconnect = False
+
+    def arm(self, *, prefer_disconnect=False):
+        self._armed = True
+        self._prefer_disconnect = prefer_disconnect
 
     def compare_and_swap_profile(self, profile, expected_storage_revision):
-        if self._first_cas:
+        if self._armed and self._first_cas:
             self._first_cas = False
             self._barrier.wait(timeout=5)
+            if self._prefer_disconnect:
+                is_disconnect = any(
+                    not connection.connected
+                    for connection in profile.memory_connections
+                )
+                if is_disconnect:
+                    saved = super().compare_and_swap_profile(
+                        profile, expected_storage_revision
+                    )
+                    self._disconnect_written.set()
+                    return saved
+                assert self._disconnect_written.wait(timeout=5)
         return super().compare_and_swap_profile(profile, expected_storage_revision)
 
 
@@ -186,6 +205,17 @@ async def test_mcp_profile_claims_require_server_preview_and_per_claim_decisions
         {"proposals": [pending.model_dump(mode="json")]},
     )
     preview_id = issued.structured_content["preview_id"]
+    assert issued.structured_content == {
+        "status": "ok",
+        "preview_id": preview_id,
+        "candidate_count": 1,
+    }
+    assert "Python" not in str(issued.structured_content)
+    assert "Python" not in " ".join(item.text for item in issued.content)
+    assert (
+        issued.meta["aiDreamJobEngine"]["payload"]["candidates"][0]["value"]
+        == "Python"
+    )
     confirmed = await server.call_tool(
         "confirm_profile_claims",
         {
@@ -198,6 +228,38 @@ async def test_mcp_profile_claims_require_server_preview_and_per_claim_decisions
     private_profile = confirmed.meta["aiDreamJobEngine"]["payload"]
     assert any(item["confirmed"] for item in private_profile["claims"])
     assert "Python" not in str(confirmed.structured_content)
+
+
+@pytest.mark.asyncio
+async def test_memory_preview_tool_keeps_candidate_values_out_of_model_content() -> None:
+    server = _profile_server(
+        LocalProfileApplication(MemoryStore(profile=CandidateProfile()))
+    )
+    candidate = _agent_candidate(value="private memory capability")
+
+    issued = await server.call_tool(
+        "preview_agent_memory_import",
+        {
+            "source_agent": "career-agent",
+            "scope": ["skills"],
+            "candidates": [candidate.model_dump(mode="json")],
+        },
+    )
+
+    preview_id = issued.structured_content["preview_id"]
+    assert issued.structured_content == {
+        "status": "ok",
+        "preview_id": preview_id,
+        "candidate_count": 1,
+    }
+    assert "private memory capability" not in str(issued.structured_content)
+    assert "private memory capability" not in " ".join(item.text for item in issued.content)
+    assert (
+        issued.meta["aiDreamJobEngine"]["payload"]["preview"]["candidates"][0][
+            "value"
+        ]
+        == "private memory capability"
+    )
 
 
 def test_profile_confirmation_persists_only_confirmed_mixed_decisions() -> None:
@@ -299,6 +361,88 @@ def test_memory_preview_is_server_issued_exact_and_single_use() -> None:
         )
 
 
+@pytest.mark.parametrize("delete_imported", [False, True])
+def test_disconnect_revokes_outstanding_memory_previews(delete_imported) -> None:
+    store = MemoryStore(profile=CandidateProfile())
+    application = LocalProfileApplication(store)
+    issued = application.preview_agent_memory_import(
+        "career-agent", ["skills"], [_agent_candidate()]
+    )
+
+    disconnected = application.disconnect_agent_memory(
+        "career-agent", delete_imported
+    )
+
+    assert disconnected.memory_connections[0].connected is False
+    with pytest.raises(ApplicationError, match="memory_preview_invalid"):
+        application.get_claim_preview(issued.preview_id)
+    with pytest.raises(ApplicationError, match="memory_preview_invalid"):
+        application.confirm_agent_memory_import(
+            issued.preview_id,
+            [ClaimDecision(claim_id="memory-1", action="accept")],
+        )
+
+
+def test_disconnect_in_other_instance_revokes_memory_confirmation(tmp_path) -> None:
+    path = tmp_path / "shared.sqlite3"
+    first_store = LocalStore.open(path)
+    second_store = LocalStore.open(path)
+    first_store.initialize()
+    first_store.save_profile(CandidateProfile())
+    first = LocalProfileApplication(first_store)
+    second = LocalProfileApplication(second_store)
+    issued = first.preview_agent_memory_import(
+        "career-agent", ["skills"], [_agent_candidate()]
+    )
+
+    second.disconnect_agent_memory("career-agent", False)
+
+    with pytest.raises(ApplicationError, match="memory_preview_invalid"):
+        first.confirm_agent_memory_import(
+            issued.preview_id,
+            [ClaimDecision(claim_id="memory-1", action="accept")],
+        )
+    loaded = first_store.load_profile()
+    assert loaded is not None
+    assert loaded.memory_connections[0].connected is False
+    assert not any(claim.confirmed for claim in loaded.claims)
+
+
+def test_concurrent_disconnect_wins_over_memory_confirmation(tmp_path) -> None:
+    path = tmp_path / "shared.sqlite3"
+    barrier = threading.Barrier(2)
+    disconnect_written = threading.Event()
+    first_store = BarrierProfileStore(path, barrier, disconnect_written)
+    second_store = BarrierProfileStore(path, barrier, disconnect_written)
+    first_store.initialize()
+    first_store.save_profile(CandidateProfile())
+    first = LocalProfileApplication(first_store)
+    second = LocalProfileApplication(second_store)
+    issued = first.preview_agent_memory_import(
+        "career-agent", ["skills"], [_agent_candidate()]
+    )
+    first_store.arm(prefer_disconnect=True)
+    second_store.arm(prefer_disconnect=True)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        confirm = pool.submit(
+            first.confirm_agent_memory_import,
+            issued.preview_id,
+            [ClaimDecision(claim_id="memory-1", action="accept")],
+        )
+        disconnect = pool.submit(
+            second.disconnect_agent_memory, "career-agent", False
+        )
+        disconnect.result(timeout=5)
+        with pytest.raises(ApplicationError, match="memory_preview_invalid"):
+            confirm.result(timeout=5)
+
+    loaded = first_store.load_profile()
+    assert loaded is not None
+    assert loaded.memory_connections[0].connected is False
+    assert not any(claim.confirmed for claim in loaded.claims)
+
+
 def test_two_profile_applications_merge_distinct_confirmations(tmp_path) -> None:
     path = tmp_path / "shared.sqlite3"
     barrier = threading.Barrier(2)
@@ -314,6 +458,8 @@ def test_two_profile_applications_merge_distinct_confirmations(tmp_path) -> None
     second_preview = second.review_profile_claims(
         [_resume_candidate("claim-b", "location", "Remote")]
     )
+    first_store.arm()
+    second_store.arm()
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         first_future = pool.submit(

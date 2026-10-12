@@ -386,6 +386,17 @@ describe("job workspace", () => {
     expect(screen.queryByText("服务端判定此岗位暂不可加入待申请")).not.toBeInTheDocument();
   });
 
+  it("renders the local full-JD evidence placeholder instead of an opaque ref", async () => {
+    const job = summary({ analysis_id: "full-jd" });
+    const jobDetail = detail(job);
+    jobDetail.trace_evidence = ["完整 JD 原文未持久化，请重新打开来源核对"];
+    render(<App bridge={bridgeWithPayload(payload([job]), async () => jobDetail)} />);
+
+    await userEvent.setup().click(await screen.findByText("JD 与候选人证据"));
+    expect(screen.getByText("完整 JD 原文未持久化，请重新打开来源核对")).toBeVisible();
+    expect(document.body.textContent).not.toContain("jd-evidence:v1:");
+  });
+
   it("keeps per-job rubric stale warnings across tabs and clears only the recomputed job", async () => {
     const user = userEvent.setup();
     const first = summary({ analysis_id: "first", title: "First stale job" });

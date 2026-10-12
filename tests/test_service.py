@@ -790,7 +790,7 @@ def test_success_projects_all_evidence_to_auditable_opaque_refs(tmp_path) -> Non
             )
         ]
     )
-    service, _, _, _ = _service(
+    service, store, _, _ = _service(
         tmp_path,
         profile=CandidateProfile(),
         rubric=_rubric(),
@@ -813,6 +813,14 @@ def test_success_projects_all_evidence_to_auditable_opaque_refs(tmp_path) -> Non
     )
     offset_ref = record.facts[0].evidence[0]
     assert f":0:{len(JOB_DESCRIPTION)}:" in offset_ref
+    detail = WorkspaceApplication(
+        store,
+        profile_application=LocalProfileApplication(store),
+        analysis_application=ConfiguredAnalysisApplication(store),
+    ).get_job_detail(record.id)
+    rendered = detail.model_dump_json()
+    assert "完整 JD 原文未持久化，请重新打开来源核对" in rendered
+    assert "jd-evidence:v1:" not in rendered
 
 
 @pytest.mark.parametrize(

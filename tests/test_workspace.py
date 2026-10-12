@@ -28,7 +28,11 @@ from ai_dream_job_engine.models import (
 )
 from ai_dream_job_engine.service import AnalysisServiceError
 from ai_dream_job_engine.rubric import rubric_revision
-from ai_dream_job_engine.workspace import WorkspaceApplication, WorkspaceError
+from ai_dream_job_engine.workspace import (
+    FULL_JD_NOT_PERSISTED,
+    WorkspaceApplication,
+    WorkspaceError,
+)
 
 
 NOW = datetime(2026, 10, 11, 12, tzinfo=timezone.utc)
@@ -253,10 +257,17 @@ def test_job_detail_preserves_all_four_gap_kinds_and_evidence(tmp_path) -> None:
 
     assert set(detail.gaps) == set(GapKind)
     assert [detail.gaps[kind][0].kind for kind in GapKind] == list(GapKind)
-    assert all(detail.gaps[kind][0].job_evidence == [JOB_REF] for kind in GapKind)
-    assert detail.preference_contributions[0].job_evidence == [JOB_REF]
-    assert detail.qualification_contributions[0].job_evidence == [JOB_REF]
-    assert detail.trace_evidence == [JOB_REF]
+    assert all(
+        detail.gaps[kind][0].job_evidence == [FULL_JD_NOT_PERSISTED]
+        for kind in GapKind
+    )
+    assert detail.preference_contributions[0].job_evidence == [
+        FULL_JD_NOT_PERSISTED
+    ]
+    assert detail.qualification_contributions[0].job_evidence == [
+        FULL_JD_NOT_PERSISTED
+    ]
+    assert detail.trace_evidence == [FULL_JD_NOT_PERSISTED]
 
 
 @pytest.mark.parametrize(

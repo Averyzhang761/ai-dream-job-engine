@@ -516,6 +516,20 @@ class LocalProfileApplication:
             if issued is None:
                 raise ApplicationError(MEMORY_PREVIEW_INVALID)
             def apply(latest: CandidateProfile) -> CandidateProfile:
+                connection = next(
+                    (
+                        item
+                        for item in latest.memory_connections
+                        if item.source_agent == issued.preview.source_agent
+                    ),
+                    None,
+                )
+                if (
+                    connection is None
+                    or not connection.connected
+                    or connection.scope != issued.preview.scope
+                ):
+                    raise ApplicationError(MEMORY_PREVIEW_INVALID)
                 try:
                     reproduced = preview_memory_import(
                         latest,
@@ -544,6 +558,11 @@ class LocalProfileApplication:
                     raise ApplicationError(INVALID_CLAIM_DECISIONS) from None
 
             updated = self._update_profile(disconnect)
+            self._previews = {
+                preview_id: preview
+                for preview_id, preview in self._previews.items()
+                if preview.preview.source_agent != source_agent
+            }
             return updated
 
     def _profile(self) -> CandidateProfile:
@@ -978,13 +997,24 @@ def build_server(services: MCPServices | None = None) -> MCPServer:
             lambda: applications.profile.initialize_profile(profile),
         )
 
-    @server.tool()
+    @server.tool(
+        meta={"ui": {"visibility": ["model", "app"]}},
+        structured_output=False,
+    )
     def review_profile_claims(
         proposals: list[CandidateClaim],
-    ) -> IssuedProfileClaimsPreview:
+    ) -> CallToolResult:
         """Issue a bound preview for pending host-supplied resume claims."""
-        return _call_safely(
+        payload = _call_safely(
             lambda: applications.profile.review_profile_claims(proposals)
+        )
+        return _private_app_result(
+            payload,
+            summary={
+                "status": "ok",
+                "preview_id": payload.preview_id,
+                "candidate_count": len(payload.candidates),
+            },
         )
 
     @server.tool(meta={"ui": {"visibility": ["app"]}}, structured_output=False)
@@ -999,17 +1029,28 @@ def build_server(services: MCPServices | None = None) -> MCPServer:
             ),
         ))
 
-    @server.tool()
+    @server.tool(
+        meta={"ui": {"visibility": ["model", "app"]}},
+        structured_output=False,
+    )
     def preview_agent_memory_import(
         source_agent: NonEmptyString,
         scope: NonEmptyStrings,
         candidates: list[CandidateClaim],
-    ) -> IssuedMemoryImportPreview:
+    ) -> CallToolResult:
         """Preview explicit host-supplied memory candidates without mutation."""
-        return _call_safely(
+        payload = _call_safely(
             lambda: applications.profile.preview_agent_memory_import(
                 source_agent, scope, candidates
             ),
+        )
+        return _private_app_result(
+            payload,
+            summary={
+                "status": "ok",
+                "preview_id": payload.preview_id,
+                "candidate_count": len(payload.preview.candidates),
+            },
         )
 
     @server.tool(meta={"ui": {"visibility": ["app"]}}, structured_output=False)
