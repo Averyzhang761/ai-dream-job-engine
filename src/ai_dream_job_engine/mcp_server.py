@@ -863,7 +863,7 @@ def build_server(services: MCPServices | None = None) -> MCPServer:
         preview_id: NonEmptyString,
         decisions: list[ClaimDecision],
     ) -> CandidateProfile:
-        """Apply per-claim decisions to a server-issued resume preview."""
+        """Apply a complete set of explicit per-claim resume decisions."""
         return _call_safely(
             lambda: applications.profile.confirm_profile_claims(
                 preview_id, decisions
@@ -888,7 +888,7 @@ def build_server(services: MCPServices | None = None) -> MCPServer:
         preview_id: NonEmptyString,
         decisions: list[ClaimDecision],
     ) -> CandidateProfile:
-        """Confirm selected claims from a prior memory preview."""
+        """Apply a complete set of explicit per-claim memory decisions."""
         return _call_safely(
             lambda: applications.profile.confirm_agent_memory_import(
                 preview_id, decisions

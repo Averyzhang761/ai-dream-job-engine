@@ -66,6 +66,18 @@ async def test_open_workspace_tool_links_only_to_workspace_resource() -> None:
     assert workspace.structured_content["claim_preview"] is None
     assert claim_review.structured_content["view"] == "claim_review"
     assert claim_review.structured_content["claim_preview"]["preview_id"] == "p" * 32
+    assert claim_review.structured_content["claim_preview"]["candidates"][0]["confirmed"] is False
+
+
+@pytest.mark.asyncio
+async def test_claim_confirmation_tools_require_explicit_decisions_and_do_not_open_ui() -> None:
+    tools = {item.name: item for item in await _server().list_tools()}
+
+    for name in ("confirm_profile_claims", "confirm_agent_memory_import"):
+        tool = tools[name]
+        assert set(tool.input_schema["required"]) == {"preview_id", "decisions"}
+        assert not tool.meta or "ui" not in tool.meta
+        assert "explicit per-claim" in tool.description
 
 
 @pytest.mark.asyncio

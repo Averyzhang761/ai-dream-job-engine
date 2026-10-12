@@ -12,6 +12,8 @@ import {
 } from "./bridge";
 import { JobDetail } from "./components/JobDetail";
 import { JobList } from "./components/JobList";
+import { EvidenceView } from "./components/EvidenceView";
+import { RubricView } from "./components/RubricView";
 import {
   isWorkspaceAppPayload,
   type JobReviewStatus,
@@ -42,6 +44,8 @@ export function App({ bridge: providedBridge }: AppProps) {
   const [activeView, setActiveView] = useState<ViewId>("jobs");
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [payload, setPayload] = useState<WorkspaceAppPayload | null>(null);
+  const [selectedAnalysisId, setSelectedAnalysisId] = useState<string | null>(null);
+  const [decisionRefresh, setDecisionRefresh] = useState(0);
   const [isNarrow, setIsNarrow] = useState(() => window.innerWidth <= 480);
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
@@ -147,12 +151,18 @@ export function App({ bridge: providedBridge }: AppProps) {
           aria-labelledby={`tab-${id}`}
           hidden={activeView !== id}
         >
-          <ViewContent
-            activeView={id}
-            connection={connection}
-            payload={payload}
-            bridge={bridge}
-          />
+          {activeView === id && (
+            <ViewContent
+              activeView={id}
+              connection={connection}
+              payload={payload}
+              bridge={bridge}
+              selectedAnalysisId={selectedAnalysisId}
+              onSelectedAnalysisChange={setSelectedAnalysisId}
+              decisionRefresh={decisionRefresh}
+              onDecisionRecomputed={() => setDecisionRefresh((value) => value + 1)}
+            />
+          )}
         </section>
       ))}
 
@@ -172,11 +182,19 @@ function ViewContent({
   connection,
   payload,
   bridge,
+  selectedAnalysisId,
+  onSelectedAnalysisChange,
+  decisionRefresh,
+  onDecisionRecomputed,
 }: {
   activeView: ViewId;
   connection: ConnectionState;
   payload: WorkspaceAppPayload | null;
   bridge: McpAppBridge;
+  selectedAnalysisId: string | null;
+  onSelectedAnalysisChange: (analysisId: string | null) => void;
+  decisionRefresh: number;
+  onDecisionRecomputed: () => void;
 }) {
   if (connection === "unavailable") {
     return (
@@ -201,32 +219,38 @@ function ViewContent({
         </div>
       );
     }
-    return <JobWorkspace bridge={bridge} initialJobs={payload.snapshot.jobs} />;
+    return <JobWorkspace bridge={bridge} initialJobs={payload.snapshot.jobs} decisionRefresh={decisionRefresh} onSelectedAnalysisChange={onSelectedAnalysisChange} />;
   }
 
   if (activeView === "standards") {
-    return (
-      <div className="state-message">
-        {payload.snapshot.rubric_ready ? "已载入当前标准" : "尚未初始化岗位标准"}
-      </div>
-    );
+    return payload.snapshot.rubric_ready ? (
+      <RubricView
+        bridge={bridge}
+        selectedAnalysisId={selectedAnalysisId}
+        onRecomputed={() => onDecisionRecomputed()}
+      />
+    ) : <div className="state-message">尚未初始化岗位标准</div>;
   }
 
-  return (
-    <div className="state-message">
-      {payload.snapshot.profile_ready
-        ? `已确认 ${payload.snapshot.confirmed_claims.length} 条证据`
-        : "尚未建立候选人证据"}
-    </div>
-  );
+  return payload.snapshot.profile_ready ? (
+    <EvidenceView
+      bridge={bridge}
+      initialClaims={payload.snapshot.confirmed_claims}
+      claimPreview={payload.claim_preview}
+    />
+  ) : <div className="state-message">尚未建立候选人证据</div>;
 }
 
 function JobWorkspace({
   bridge,
   initialJobs,
+  decisionRefresh,
+  onSelectedAnalysisChange,
 }: {
   bridge: McpAppBridge;
   initialJobs: WorkspaceJobSummary[];
+  decisionRefresh: number;
+  onSelectedAnalysisChange: (analysisId: string | null) => void;
 }) {
   const [jobs, setJobs] = useState(initialJobs);
   const [selectedId, setSelectedId] = useState<string | null>(
@@ -248,9 +272,10 @@ function JobWorkspace({
           ? current
           : initialJobs[0]?.analysis_id ?? null;
       selectedIdRef.current = next;
+      onSelectedAnalysisChange(next);
       return next;
     });
-  }, [initialJobs]);
+  }, [initialJobs, onSelectedAnalysisChange]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -288,7 +313,7 @@ function JobWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [bridge, loadAttempt, selectedId]);
+  }, [bridge, decisionRefresh, loadAttempt, selectedId]);
 
   const replaceFromServer = (
     requestedId: string,
@@ -361,6 +386,7 @@ function JobWorkspace({
   const selectJob = (analysisId: string) => {
     selectedIdRef.current = analysisId;
     setSelectedId(analysisId);
+    onSelectedAnalysisChange(analysisId);
     setDetail(null);
     setAnnouncement("");
   };

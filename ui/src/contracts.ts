@@ -38,7 +38,90 @@ export interface CandidateClaim {
   source_agent: string | null;
   observed_at: string | null;
   confidence: number | null;
-  import_origin: Record<string, unknown> | null;
+  import_origin: ClaimImportOrigin | null;
+}
+
+export interface ClaimImportOrigin {
+  source_agent: string;
+  candidate_id: string;
+  provenance: string;
+  claim_type: string;
+  candidate_value: unknown;
+  confirmed_value: unknown;
+}
+
+export interface CandidateProfile {
+  id: string;
+  claims: CandidateClaim[];
+  import_receipts: Array<Record<string, unknown>>;
+  version: string;
+  updated_at: string;
+}
+
+export type FactDataType = "boolean" | "number" | "text" | "enum" | "list";
+export type CandidateComparison =
+  | "none"
+  | "exact"
+  | "allowed_alternatives"
+  | "required_subset"
+  | "candidate_at_least";
+
+export interface FactDefinition {
+  id: string;
+  name: string;
+  definition: string;
+  data_type: FactDataType;
+  extraction_instructions: string;
+  requires_evidence: boolean;
+  missing_policy: "unknown" | "default";
+  default_value: unknown | null;
+  enum_values: string[];
+  candidate_comparison: CandidateComparison;
+  qualification_weight: number;
+}
+
+export interface ValueDimension {
+  id: string;
+  name: string;
+  definition: string;
+  examples: string[];
+  fact_ids: string[];
+  signal_ids: string[];
+  weight: number;
+  scoring_direction: "higher_is_better" | "lower_is_better";
+  positive_keywords: string[];
+  negative_keywords: string[];
+  hard_constraint: boolean;
+  threshold: number | null;
+  explanation_template: string | null;
+}
+
+export interface DecisionQuestion {
+  id: string;
+  version: string;
+  question: string;
+}
+
+export interface Rubric {
+  id: string;
+  version: string;
+  revision: string;
+  facts: FactDefinition[];
+  dimensions: ValueDimension[];
+  questions: DecisionQuestion[];
+  recommendation_thresholds: Record<RecommendationLevel, number>;
+}
+
+export interface RubricPatch {
+  fact_updates?: Record<string, Partial<FactDefinition>>;
+  dimension_updates?: Record<string, Partial<ValueDimension>>;
+  threshold_updates?: Partial<Record<RecommendationLevel, number>>;
+}
+
+export interface ClaimDecision {
+  claim_id: string;
+  action: "accept" | "edit" | "reject";
+  edited_value?: unknown;
 }
 
 export interface WorkspaceJobSummary {
