@@ -73,21 +73,40 @@ function bridge(activeRubric: Rubric = rubric) {
 describe("RubricView", () => {
   afterEach(() => cleanup());
 
-  it("uses dropdowns to edit one fact and one dimension at a time", async () => {
+  async function openDimension(user: ReturnType<typeof userEvent.setup>, name = "产品协作") {
+    await user.click(await screen.findByRole("button", { name: `编辑 ${name}` }));
+  }
+
+  async function openFact(user: ReturnType<typeof userEvent.setup>, name = "工作地点") {
+    await user.click(await screen.findByRole("tab", { name: /判断字段/ }));
+    await user.click(screen.getByRole("button", { name: `编辑 ${name}` }));
+  }
+
+  it("keeps 20+ standards scannable and edits one item in a side panel", async () => {
     const user = userEvent.setup();
     const expandedRubric = structuredClone(rubric);
-    expandedRubric.facts.push({ ...expandedRubric.facts[0], id: "salary", name: "薪资范围" });
-    expandedRubric.dimensions.push({ ...expandedRubric.dimensions[0], id: "growth", name: "成长空间" });
+    expandedRubric.dimensions = Array.from({ length: 24 }, (_, index) => ({
+      ...expandedRubric.dimensions[0],
+      id: `standard_${index + 1}`,
+      name: index === 17 ? "远程工作偏好" : `标准 ${index + 1}`,
+    }));
     render(<RubricView bridge={bridge(expandedRubric).value} selectedAnalysisId={null} onRecomputed={vi.fn()} />);
 
-    expect(await screen.findByRole("combobox", { name: "选择事实字段" })).toHaveValue("0");
-    expect(screen.getByRole("combobox", { name: "选择价值维度" })).toHaveValue("0");
-    expect(screen.getByRole("group", { name: "编辑：工作地点" })).toBeVisible();
-    expect(screen.queryByRole("group", { name: "编辑：薪资范围" })).not.toBeInTheDocument();
-    expect(screen.getAllByText("高级设置")).toHaveLength(2);
-    await user.selectOptions(screen.getByRole("combobox", { name: "选择事实字段" }), "1");
-    expect(screen.getByRole("group", { name: "编辑：薪资范围" })).toBeVisible();
-    expect(screen.queryByRole("group", { name: "编辑：工作地点" })).not.toBeInTheDocument();
+    const table = await screen.findByRole("table", { name: "求职标准列表" });
+    expect(screen.getByText("24 条求职标准 · 1 个判断字段")).toBeVisible();
+    expect(table.querySelectorAll(".standard-row")).toHaveLength(24);
+    expect(screen.queryByLabelText("标准编辑面板")).not.toBeInTheDocument();
+
+    await user.type(screen.getByRole("searchbox", { name: "搜索标准" }), "远程");
+    expect(screen.getByText("远程工作偏好")).toBeVisible();
+    expect(screen.queryByText("标准 1")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "编辑 远程工作偏好" }));
+    expect(screen.getByLabelText("标准编辑面板")).toBeVisible();
+    expect(screen.getByRole("region", { name: "编辑 远程工作偏好" })).toBeVisible();
+
+    await user.click(screen.getByRole("tab", { name: /判断字段/ }));
+    expect(screen.getByRole("table", { name: "判断字段列表" })).toBeVisible();
+    expect(screen.queryByLabelText("标准编辑面板")).not.toBeInTheDocument();
   });
 
   it("renders server definitions and sends only changed declarative fields", async () => {
@@ -103,8 +122,7 @@ describe("RubricView", () => {
       />,
     );
 
-    expect(await screen.findByDisplayValue("工作地点")).toBeVisible();
-    expect(screen.getByDisplayValue("产品协作")).toBeVisible();
+    await openFact(user);
     const name = screen.getByLabelText("事实名称 location");
     await user.clear(name);
     await user.type(name, "首选地点");
@@ -123,9 +141,9 @@ describe("RubricView", () => {
     const user = userEvent.setup();
     const mock = bridge();
     render(<RubricView bridge={mock.value} selectedAnalysisId={null} onRecomputed={vi.fn()} />);
-    await screen.findByDisplayValue("工作地点");
-
-    await user.click(screen.getByRole("button", { name: "新增事实字段" }));
+    await screen.findByRole("table", { name: "求职标准列表" });
+    await user.click(screen.getByText("新增"));
+    await user.click(screen.getByRole("button", { name: "判断字段" }));
     await user.click(screen.getByRole("button", { name: "保存标准" }));
     expect(await screen.findByText(/请补全新增事实字段/)).toBeVisible();
     expect(mock.calls.filter((call) => call.name === "update_rubric")).toHaveLength(0);
@@ -133,9 +151,10 @@ describe("RubricView", () => {
     cleanup();
     const numericMock = bridge();
     render(<RubricView bridge={numericMock.value} selectedAnalysisId={null} onRecomputed={vi.fn()} />);
-    const weight = await screen.findByLabelText("维度权重 product_facing");
-    await user.clear(weight);
-    await user.type(weight, "not-a-number");
+    await openDimension(user);
+    const threshold = screen.getByLabelText("最低通过分");
+    await user.clear(threshold);
+    await user.type(threshold, "not-a-number");
     await user.click(screen.getByRole("button", { name: "保存标准" }));
     expect(await screen.findByText(/请输入有效数字/)).toBeVisible();
     expect(numericMock.calls.filter((call) => call.name === "update_rubric")).toHaveLength(0);
@@ -154,7 +173,8 @@ describe("RubricView", () => {
         onRecomputed={onRecomputed}
       />,
     );
-    await user.clear(await screen.findByLabelText("事实名称 location"));
+    await openFact(user);
+    await user.clear(screen.getByLabelText("事实名称 location"));
     await user.type(screen.getByLabelText("事实名称 location"), "地点偏好");
     await user.click(screen.getByRole("button", { name: "保存标准" }));
     expect(mock.calls.some((call) => call.name === "recompute_decision")).toBe(false);
@@ -182,7 +202,8 @@ describe("RubricView", () => {
     const mock = bridge(enumRubric);
     render(<RubricView bridge={mock.value} selectedAnalysisId={null} onRecomputed={vi.fn()} />);
 
-    const input = await screen.findByLabelText("事实默认值 location");
+    await openFact(user);
+    const input = screen.getByLabelText("事实默认值 location");
     await user.clear(input);
     await user.type(input, "onsite");
     await user.click(screen.getByRole("button", { name: "保存标准" }));
@@ -203,7 +224,8 @@ describe("RubricView", () => {
     };
     const numericMock = bridge(numericRubric);
     render(<RubricView bridge={numericMock.value} selectedAnalysisId={null} onRecomputed={vi.fn()} />);
-    const numberInput = await screen.findByLabelText("事实默认值 location");
+    await openFact(user);
+    const numberInput = screen.getByLabelText("事实默认值 location");
     await user.clear(numberInput);
     await user.type(numberInput, "Infinity");
     await user.click(screen.getByRole("button", { name: "保存标准" }));
@@ -220,7 +242,7 @@ describe("RubricView", () => {
     };
     const booleanMock = bridge(booleanRubric);
     render(<RubricView bridge={booleanMock.value} selectedAnalysisId={null} onRecomputed={vi.fn()} />);
-    await screen.findByLabelText("事实默认值 location");
+    await openFact(user);
     await user.clear(screen.getByLabelText("事实名称 location"));
     await user.type(screen.getByLabelText("事实名称 location"), "地点要求");
     await user.click(screen.getByRole("button", { name: "保存标准" }));

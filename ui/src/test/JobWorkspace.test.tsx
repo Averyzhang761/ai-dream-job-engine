@@ -417,7 +417,9 @@ describe("job workspace", () => {
     await screen.findByRole("heading", { name: "First stale job" });
 
     await user.click(screen.getByRole("tab", { name: "我的标准" }));
-    const factName = await screen.findByLabelText("事实名称 location");
+    await user.click(await screen.findByRole("tab", { name: /判断字段/ }));
+    await user.click(screen.getByRole("button", { name: "编辑 地点" }));
+    const factName = screen.getByLabelText("事实名称 location");
     await user.clear(factName);
     await user.type(factName, "目标地点");
     await user.click(screen.getByRole("button", { name: "保存标准" }));
