@@ -348,15 +348,20 @@ def test_memory_preview_is_server_issued_exact_and_single_use() -> None:
 
     assert first.preview_id != second.preview_id
     assert len(first.preview_id) >= 32
-    first.preview.candidates[0].value = "forged caller value"
+    with pytest.raises(ApplicationError, match="memory_preview_invalid"):
+        application.confirm_agent_memory_import(
+            first.preview_id,
+            [ClaimDecision(claim_id="memory-1", action="accept")],
+        )
+    second.preview.candidates[0].value = "forged caller value"
     updated = application.confirm_agent_memory_import(
-        first.preview_id,
+        second.preview_id,
         [ClaimDecision(claim_id="memory-1", action="accept")],
     )
     assert updated.claims[-1].value == "Python"
     with pytest.raises(ApplicationError, match="memory_preview_invalid"):
         application.confirm_agent_memory_import(
-            first.preview_id,
+            second.preview_id,
             [ClaimDecision(claim_id="memory-1", action="accept")],
         )
 
@@ -406,6 +411,49 @@ def test_disconnect_in_other_instance_revokes_memory_confirmation(tmp_path) -> N
     assert loaded is not None
     assert loaded.memory_connections[0].connected is False
     assert not any(claim.confirmed for claim in loaded.claims)
+
+
+def test_old_preview_cannot_replay_after_disconnect_and_same_scope_reconnect(
+    tmp_path,
+) -> None:
+    path = tmp_path / "shared.sqlite3"
+    first_store = LocalStore.open(path)
+    second_store = LocalStore.open(path)
+    first_store.initialize()
+    first_store.save_profile(CandidateProfile())
+    first = LocalProfileApplication(first_store)
+    second = LocalProfileApplication(second_store)
+    old = first.preview_agent_memory_import(
+        "career-agent",
+        ["skills"],
+        [_agent_candidate("old-memory", "old private claim")],
+    )
+
+    second.disconnect_agent_memory("career-agent", True)
+    current = second.preview_agent_memory_import(
+        "career-agent",
+        ["skills"],
+        [_agent_candidate("current-memory", "current private claim")],
+    )
+
+    with pytest.raises(ApplicationError, match="memory_preview_invalid"):
+        first.confirm_agent_memory_import(
+            old.preview_id,
+            [ClaimDecision(claim_id="old-memory", action="accept")],
+        )
+    confirmed = second.confirm_agent_memory_import(
+        current.preview_id,
+        [ClaimDecision(claim_id="current-memory", action="accept")],
+    )
+
+    connection = confirmed.memory_connections[0]
+    assert connection.connected is True
+    assert connection.generation == 3
+    assert any(
+        claim.confirmed and claim.value == "current private claim"
+        for claim in confirmed.claims
+    )
+    assert not any(claim.value == "old private claim" for claim in confirmed.claims)
 
 
 def test_concurrent_disconnect_wins_over_memory_confirmation(tmp_path) -> None:

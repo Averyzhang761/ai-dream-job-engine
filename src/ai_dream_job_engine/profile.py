@@ -479,7 +479,13 @@ def disconnect_memory_source(
 
     _validate_profile(profile)
     connections = [
-        item.model_copy(update={"connected": False}, deep=True)
+        item.model_copy(
+            update={
+                "connected": False,
+                "generation": item.generation + 1,
+            },
+            deep=True,
+        )
         if item.source_agent == source_agent
         else item.model_copy(deep=True)
         for item in profile.memory_connections
@@ -524,10 +530,19 @@ def profile_with_memory_connection(
 ) -> CandidateProfile:
     """Persist explicit source authorization separately from retained claims."""
 
+    existing = next(
+        (
+            item
+            for item in profile.memory_connections
+            if item.source_agent == preview.source_agent
+        ),
+        None,
+    )
     connection = AgentMemoryConnection(
         source_agent=preview.source_agent,
         scope=list(preview.scope),
         connected=True,
+        generation=(existing.generation + 1 if existing is not None else 1),
     )
     connections = [
         item.model_copy(deep=True)

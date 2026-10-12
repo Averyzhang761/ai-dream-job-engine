@@ -49,7 +49,7 @@ const profile: CandidateProfile = {
     },
   ],
   import_receipts: [],
-  memory_connections: [{ source_agent: "Codex", scope: ["项目"], connected: true }],
+  memory_connections: [{ source_agent: "Codex", scope: ["项目"], connected: true, generation: 1 }],
 };
 
 const preview: ClaimPreviewView = {
@@ -192,7 +192,7 @@ describe("EvidenceView", () => {
   it("does not infer an Agent connection from retained imported claims", async () => {
     const disconnectedProfile = {
       ...profile,
-      memory_connections: [{ source_agent: "Codex", scope: ["项目"], connected: false }],
+      memory_connections: [{ source_agent: "Codex", scope: ["项目"], connected: false, generation: 2 }],
     };
     const disconnectedBridge = bridge();
     disconnectedBridge.value.callTool = async <T,>(name: string) => {

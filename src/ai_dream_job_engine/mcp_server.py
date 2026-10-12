@@ -173,6 +173,7 @@ class IssuedProfileClaimsPreview(BaseModel):
 class _RegisteredPreview:
     profile_digest: str
     binding_digest: str
+    generation: int
     preview: MemoryImportPreview
 
 
@@ -382,6 +383,8 @@ class LocalProfileApplication:
                 raise ApplicationError(error)
             if _model_digest(profile) != memory_preview.profile_digest:
                 raise ApplicationError(MEMORY_PREVIEW_INVALID)
+            if not _memory_preview_is_current(profile, memory_preview):
+                raise ApplicationError(MEMORY_PREVIEW_INVALID)
             try:
                 reproduced = preview_memory_import(
                     profile,
@@ -494,11 +497,17 @@ class LocalProfileApplication:
                 raise ApplicationError(MEMORY_PREVIEW_INVALID) from None
             preview_id = self._new_preview_id(_MEMORY_PREVIEW_PREFIX)
             registered_preview = preview.model_copy(deep=True)
+            connection = next(
+                item
+                for item in profile.memory_connections
+                if item.source_agent == source_agent
+            )
             self._previews[preview_id] = _RegisteredPreview(
                 profile_digest=_model_digest(profile),
                 binding_digest=_preview_binding_digest(
                     profile, registered_preview
                 ),
+                generation=connection.generation,
                 preview=registered_preview,
             )
             return IssuedMemoryImportPreview(
@@ -516,19 +525,7 @@ class LocalProfileApplication:
             if issued is None:
                 raise ApplicationError(MEMORY_PREVIEW_INVALID)
             def apply(latest: CandidateProfile) -> CandidateProfile:
-                connection = next(
-                    (
-                        item
-                        for item in latest.memory_connections
-                        if item.source_agent == issued.preview.source_agent
-                    ),
-                    None,
-                )
-                if (
-                    connection is None
-                    or not connection.connected
-                    or connection.scope != issued.preview.scope
-                ):
+                if not _memory_preview_is_current(latest, issued):
                     raise ApplicationError(MEMORY_PREVIEW_INVALID)
                 try:
                     reproduced = preview_memory_import(
@@ -786,6 +783,25 @@ def _preview_binding_digest(
         sort_keys=True,
     ).encode()
     return hashlib.sha256(payload).hexdigest()
+
+
+def _memory_preview_is_current(
+    profile: CandidateProfile, issued: _RegisteredPreview
+) -> bool:
+    connection = next(
+        (
+            item
+            for item in profile.memory_connections
+            if item.source_agent == issued.preview.source_agent
+        ),
+        None,
+    )
+    return bool(
+        connection is not None
+        and connection.connected
+        and connection.scope == issued.preview.scope
+        and connection.generation == issued.generation
+    )
 
 
 def _validate_resume_proposals(proposals: list[CandidateClaim]) -> None:

@@ -94,6 +94,7 @@ class AgentMemoryConnection(DomainModel):
     source_agent: str = Field(min_length=1)
     scope: list[str] = Field(min_length=1)
     connected: bool = True
+    generation: int = Field(default=0, ge=0)
 
 
 class CandidateClaim(DomainModel):

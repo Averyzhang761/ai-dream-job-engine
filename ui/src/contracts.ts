@@ -58,6 +58,7 @@ export interface CandidateProfile {
     source_agent: string;
     scope: string[];
     connected: boolean;
+    generation: number;
   }>;
   version: string;
   storage_revision?: number;

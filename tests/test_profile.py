@@ -114,6 +114,37 @@ def test_memory_preview_records_connection_and_disconnect_preserves_claims() -> 
     assert disconnected.memory_connections[0].connected is False
 
 
+def test_legacy_memory_connection_defaults_to_generation_zero() -> None:
+    profile = CandidateProfile.model_validate(
+        {
+            "memory_connections": [
+                {
+                    "source_agent": "career-agent",
+                    "scope": ["preferences"],
+                    "connected": True,
+                }
+            ]
+        }
+    )
+
+    assert profile.memory_connections[0].generation == 0
+
+
+def test_memory_connection_generation_advances_on_preview_disconnect_and_reconnect() -> None:
+    candidate = memory_claim("memory-1", "preferred_role", "Applied AI PM")
+    preview = preview_memory_import(
+        CandidateProfile(), "career-agent", ["preferences"], [candidate]
+    )
+
+    first = profile_with_memory_connection(CandidateProfile(), preview)
+    disconnected = disconnect_memory_source(first, "career-agent", False)
+    reconnected = profile_with_memory_connection(disconnected, preview)
+
+    assert first.memory_connections[0].generation == 1
+    assert disconnected.memory_connections[0].generation == 2
+    assert reconnected.memory_connections[0].generation == 3
+
+
 def test_previewed_candidate_can_be_confirmed_and_unknown_ids_are_rejected() -> None:
     profile = CandidateProfile()
     candidate = memory_claim("memory-1", "preferred_role", "Applied AI PM")
