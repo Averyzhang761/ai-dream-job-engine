@@ -349,81 +349,84 @@ class JobAnalysisService:
         return record
 
     def recompute_decision(self, analysis_id: str) -> AnalysisRecord:
-        existing = self._find_analysis(analysis_id)
-        if existing is None:
-            raise AnalysisServiceError(
-                "analysis_not_found",
-                "Analysis was not found; choose a successful analysis ID.",
+        while True:
+            existing = self._find_analysis(analysis_id)
+            if existing is None:
+                raise AnalysisServiceError(
+                    "analysis_not_found",
+                    "Analysis was not found; choose a successful analysis ID.",
+                )
+            if (
+                existing.status != "success"
+                or existing.result is None
+                or existing.trace is None
+            ):
+                raise AnalysisServiceError(
+                    "analysis_not_successful",
+                    "Analysis cannot be recomputed; choose a successful analysis ID.",
+                )
+            _validate_stored_record_or_raise(existing)
+            profile, rubric = self._active_inputs()
+            safety = _PersistedRecordSafety(
+                existing.input_hash, rubric, profile, None
             )
-        if (
-            existing.status != "success"
-            or existing.result is None
-            or existing.trace is None
-        ):
-            raise AnalysisServiceError(
-                "analysis_not_successful",
-                "Analysis cannot be recomputed; choose a successful analysis ID.",
-            )
-        _validate_stored_record_or_raise(existing)
-        profile, rubric = self._active_inputs()
-        safety = _PersistedRecordSafety(
-            existing.input_hash, rubric, profile, None
-        )
-        started_at = self._monotonic_clock()
-        metadata = {
-            "providers": existing.trace.providers,
-            "models": existing.trace.model_versions,
-            "prompts": existing.trace.prompt_versions,
-        }
-        failed = False
-        try:
-            result = _decision(
-                existing.facts,
-                existing.signals,
-                safety.profile,
-                rubric,
-                metadata["models"],
-                metadata["prompts"],
-            )
-            trace = _trace(
-                existing.id,
-                existing.facts,
-                existing.signals,
-                safety.profile,
-                rubric,
-                result,
-                metadata,
-            )
-            recomputed = safety.validate(
-                existing.model_copy(
-                    update={
-                        "decision_revision": existing.decision_revision + 1,
-                        "result": result,
-                        "trace": trace,
-                        "decision_surface": _surface_manifest(
-                            _decision_surface(safety.profile, rubric)
-                        ),
-                        "latency_ms": _latency_ms(
-                            started_at, self._monotonic_clock()
-                        ),
-                        "error_category": None,
-                        "error": None,
-                    }
-                ),
-                require_current_inputs=False,
-            )
-        except Exception:
-            failed = True
-        if failed:
-            self._raise_failed_analysis(
-                safety,
-                existing.input_hash,
-                self._utc_clock(),
-                started_at,
-                source_analysis_id=existing.id,
-            )
-        self._save_or_raise(recomputed)
-        return recomputed
+            started_at = self._monotonic_clock()
+            metadata = {
+                "providers": existing.trace.providers,
+                "models": existing.trace.model_versions,
+                "prompts": existing.trace.prompt_versions,
+            }
+            failed = False
+            try:
+                result = _decision(
+                    existing.facts,
+                    existing.signals,
+                    safety.profile,
+                    rubric,
+                    metadata["models"],
+                    metadata["prompts"],
+                )
+                trace = _trace(
+                    existing.id,
+                    existing.facts,
+                    existing.signals,
+                    safety.profile,
+                    rubric,
+                    result,
+                    metadata,
+                )
+                recomputed = safety.validate(
+                    existing.model_copy(
+                        update={
+                            "decision_revision": existing.decision_revision + 1,
+                            "result": result,
+                            "trace": trace,
+                            "decision_surface": _surface_manifest(
+                                _decision_surface(safety.profile, rubric)
+                            ),
+                            "latency_ms": _latency_ms(
+                                started_at, self._monotonic_clock()
+                            ),
+                            "error_category": None,
+                            "error": None,
+                        }
+                    ),
+                    require_current_inputs=False,
+                )
+            except Exception:
+                failed = True
+            if failed:
+                self._raise_failed_analysis(
+                    safety,
+                    existing.input_hash,
+                    self._utc_clock(),
+                    started_at,
+                    source_analysis_id=existing.id,
+                )
+            if self._compare_and_swap_or_raise(
+                recomputed, existing.decision_revision
+            ):
+                return recomputed
 
     def get_decision_trace(self, analysis_id: str) -> DecisionTrace:
         record = self._find_analysis(analysis_id)
@@ -521,16 +524,21 @@ class JobAnalysisService:
                 _STORAGE_CATEGORY, _STORAGE_MESSAGE
             ) from None
 
-    def _save_or_raise(self, record: AnalysisRecord) -> None:
+    def _compare_and_swap_or_raise(
+        self, record: AnalysisRecord, expected_decision_revision: int
+    ) -> bool:
         failed = False
         try:
-            self._store.save_analysis(record)
+            saved = self._store.compare_and_swap_analysis(
+                record, expected_decision_revision
+            )
         except Exception:
             failed = True
         if failed:
             raise AnalysisServiceError(
                 _STORAGE_CATEGORY, _STORAGE_MESSAGE
             ) from None
+        return saved
 
     def _raise_failed_analysis(
         self,

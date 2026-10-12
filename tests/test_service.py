@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import hashlib
+import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import httpx
 import pytest
 
 from ai_dream_job_engine.database import LocalStore
+from ai_dream_job_engine.mcp_server import (
+    ConfiguredAnalysisApplication,
+    LocalProfileApplication,
+)
 from ai_dream_job_engine.models import (
     CandidateClaim,
     CandidateProfile,
@@ -18,6 +24,7 @@ from ai_dream_job_engine.models import (
     ExtractedFact,
     FactDataType,
     FactDefinition,
+    JobReviewStatus,
     RecommendationLevel,
     Rubric,
     RubricPatch,
@@ -28,6 +35,7 @@ from ai_dream_job_engine.providers.base import ProviderError
 from ai_dream_job_engine.providers.jev import JevSignalProvider
 from ai_dream_job_engine.rubric import apply_rubric_patch, load_default_rubric
 from ai_dream_job_engine.service import AnalysisServiceError, JobAnalysisService
+from ai_dream_job_engine.workspace import WorkspaceApplication
 
 
 JOB_DESCRIPTION = "Senior Python Engineer at Acme. Remote role."
@@ -264,6 +272,105 @@ def test_recompute_reuses_normalized_inputs_without_model_calls(tmp_path) -> Non
     assert recomputed.trace.model_versions == original.trace.model_versions
     assert recomputed.trace.prompt_versions == original.trace.prompt_versions
     assert store.list_analyses() == [recomputed]
+
+
+def test_shared_sqlite_recomputes_serialize_revisions_and_stale_readiness(
+    tmp_path, monkeypatch
+) -> None:
+    rubric = _rubric()
+    rubric.facts[0] = rubric.facts[0].model_copy(
+        update={"candidate_comparison": "exact", "qualification_weight": 1}
+    )
+    profile = CandidateProfile(
+        claims=[
+            CandidateClaim(
+                id="confirmed-job-title",
+                claim_type="job_title",
+                value="Senior Python Engineer",
+                source=ClaimSource.USER_CONFIRMED,
+                confirmed=True,
+                source_quote="Senior Python Engineer",
+            )
+        ]
+    )
+    service, first_store, _, _ = _service(
+        tmp_path,
+        profile=profile,
+        rubric=rubric,
+    )
+    original = service.analyze_job(JOB_DESCRIPTION)
+    assert original.result is not None
+    assert original.result.recommendation is RecommendationLevel.PRIORITY_APPLY
+
+    database_path = tmp_path / "store.sqlite3"
+    second_store = LocalStore.open(database_path)
+    second_store.initialize()
+    first_application = ConfiguredAnalysisApplication(first_store)
+    second_application = ConfiguredAnalysisApplication(second_store)
+    workspace = WorkspaceApplication(
+        first_store,
+        profile_application=LocalProfileApplication(first_store),
+        analysis_application=first_application,
+    )
+
+    reads_aligned = threading.Barrier(2)
+    thread_state = threading.local()
+    original_find = JobAnalysisService._find_analysis
+
+    def aligned_find(service, analysis_id):
+        record = original_find(service, analysis_id)
+        if threading.current_thread() is not threading.main_thread() and not getattr(
+            thread_state, "aligned", False
+        ):
+            thread_state.aligned = True
+            reads_aligned.wait(timeout=2)
+        return record
+
+    monkeypatch.setattr(JobAnalysisService, "_find_analysis", aligned_find)
+
+    ready_saved = threading.Event()
+    first_write = first_store.compare_and_swap_analysis
+    second_write = second_store.compare_and_swap_analysis
+
+    def save_ready_after_first_write(*args, **kwargs):
+        saved = first_write(*args, **kwargs)
+        record = args[0]
+        if saved is not False and record.decision_revision == 2:
+            workspace.set_review_status(
+                original.id, JobReviewStatus.READY_TO_APPLY
+            )
+            ready_saved.set()
+        return saved
+
+    def wait_for_ready_before_second_write(*args, **kwargs):
+        record = args[0]
+        if record.decision_revision == 2:
+            assert ready_saved.wait(timeout=2)
+        return second_write(*args, **kwargs)
+
+    monkeypatch.setattr(
+        first_store, "compare_and_swap_analysis", save_ready_after_first_write
+    )
+    monkeypatch.setattr(
+        second_store, "compare_and_swap_analysis", wait_for_ready_before_second_write
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first_future = executor.submit(
+            first_application.recompute_decision, original.id
+        )
+        second_future = executor.submit(
+            second_application.recompute_decision, original.id
+        )
+        recomputed = [first_future.result(timeout=3), second_future.result(timeout=3)]
+
+    assert sorted(record.decision_revision for record in recomputed) == [2, 3]
+    assert first_store.list_analyses()[0].decision_revision == 3
+    assert first_store.load_job_review(original.id).decision_revision == 2
+    assert (
+        workspace.get_job_detail(original.id).summary.review_status
+        is JobReviewStatus.UNREVIEWED
+    )
 
 
 def test_configured_default_persists_and_recomputes_with_audit_support(tmp_path) -> None:

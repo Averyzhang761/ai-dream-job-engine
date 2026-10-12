@@ -95,6 +95,51 @@ class LocalStore:
             replace_created_at=True,
         )
 
+    def compare_and_swap_analysis(
+        self, record: AnalysisRecord, expected_decision_revision: int
+    ) -> bool:
+        if record.decision_revision != expected_decision_revision + 1:
+            raise StoreError("invalid analysis revision update")
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            with closing(sqlite3.connect(self._path)) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    """
+                    SELECT schema_version, payload
+                    FROM analyses
+                    WHERE id = ?
+                    """,
+                    (record.id,),
+                ).fetchone()
+                if row is None:
+                    connection.rollback()
+                    return False
+                current = self._validate_payload(
+                    "analysis", row, AnalysisRecord
+                )
+                if current.decision_revision != expected_decision_revision:
+                    connection.rollback()
+                    return False
+                connection.execute(
+                    """
+                    UPDATE analyses
+                    SET schema_version = ?, payload = ?, created_at = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        SCHEMA_VERSION,
+                        record.model_dump_json(),
+                        self._utc_timestamp(record.created_at),
+                        now,
+                        record.id,
+                    ),
+                )
+                connection.commit()
+                return True
+        except sqlite3.DatabaseError as error:
+            raise StoreError("analysis compare-and-swap failed") from error
+
     def insert_analysis(self, record: AnalysisRecord) -> None:
         now = datetime.now(timezone.utc).isoformat()
         try:
