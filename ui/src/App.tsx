@@ -10,9 +10,14 @@ import {
   type McpAppBridge,
   UI_UNAVAILABLE_MESSAGE,
 } from "./bridge";
+import { JobDetail } from "./components/JobDetail";
+import { JobList } from "./components/JobList";
 import {
   isWorkspaceAppPayload,
+  type JobReviewStatus,
   type WorkspaceAppPayload,
+  type WorkspaceJobDetail,
+  type WorkspaceJobSummary,
 } from "./contracts";
 import "./styles.css";
 
@@ -146,6 +151,7 @@ export function App({ bridge: providedBridge }: AppProps) {
             activeView={id}
             connection={connection}
             payload={payload}
+            bridge={bridge}
           />
         </section>
       ))}
@@ -165,10 +171,12 @@ function ViewContent({
   activeView,
   connection,
   payload,
+  bridge,
 }: {
   activeView: ViewId;
   connection: ConnectionState;
   payload: WorkspaceAppPayload | null;
+  bridge: McpAppBridge;
 }) {
   if (connection === "unavailable") {
     return (
@@ -193,13 +201,7 @@ function ViewContent({
         </div>
       );
     }
-    return (
-      <div className="state-message">
-        {payload.snapshot.jobs.length === 0
-          ? "尚无已分析岗位"
-          : `已载入 ${payload.snapshot.jobs.length} 个岗位`}
-      </div>
-    );
+    return <JobWorkspace bridge={bridge} initialJobs={payload.snapshot.jobs} />;
   }
 
   if (activeView === "standards") {
@@ -215,6 +217,145 @@ function ViewContent({
       {payload.snapshot.profile_ready
         ? `已确认 ${payload.snapshot.confirmed_claims.length} 条证据`
         : "尚未建立候选人证据"}
+    </div>
+  );
+}
+
+function JobWorkspace({
+  bridge,
+  initialJobs,
+}: {
+  bridge: McpAppBridge;
+  initialJobs: WorkspaceJobSummary[];
+}) {
+  const [jobs, setJobs] = useState(initialJobs);
+  const [selectedId, setSelectedId] = useState<string | null>(
+    initialJobs[0]?.analysis_id ?? null,
+  );
+  const [detail, setDetail] = useState<WorkspaceJobDetail | null>(null);
+  const [loadingDetail, setLoadingDetail] = useState(Boolean(selectedId));
+  const [busy, setBusy] = useState(false);
+  const [announcement, setAnnouncement] = useState("");
+
+  useEffect(() => {
+    setJobs(initialJobs);
+    setSelectedId((current) =>
+      current && initialJobs.some((job) => job.analysis_id === current)
+        ? current
+        : initialJobs[0]?.analysis_id ?? null,
+    );
+  }, [initialJobs]);
+
+  useEffect(() => {
+    if (!selectedId) {
+      setDetail(null);
+      setLoadingDetail(false);
+      return;
+    }
+    let cancelled = false;
+    setLoadingDetail(true);
+    bridge
+      .callTool<WorkspaceJobDetail>("get_workspace_job", {
+        analysis_id: selectedId,
+      })
+      .then((nextDetail) => {
+        if (!cancelled) setDetail(nextDetail);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setDetail(null);
+          setAnnouncement("无法载入岗位详情；请重试");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingDetail(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [bridge, selectedId]);
+
+  const replaceFromServer = (nextDetail: WorkspaceJobDetail) => {
+    setDetail(nextDetail);
+    setJobs((current) =>
+      current.map((job) =>
+        job.analysis_id === nextDetail.summary.analysis_id
+          ? nextDetail.summary
+          : job,
+      ),
+    );
+  };
+
+  const refreshSelected = async () => {
+    if (!selectedId) return false;
+    try {
+      const refreshed = await bridge.callTool<WorkspaceJobDetail>(
+        "get_workspace_job",
+        { analysis_id: selectedId },
+      );
+      replaceFromServer(refreshed);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const review = async (status: JobReviewStatus) => {
+    if (!selectedId || busy) return;
+    setBusy(true);
+    setAnnouncement("");
+    try {
+      const nextDetail = await bridge.callTool<WorkspaceJobDetail>(
+        "set_job_review_status",
+        { analysis_id: selectedId, status },
+      );
+      replaceFromServer(nextDetail);
+      setAnnouncement(
+        status === "kept"
+          ? "已保留此岗位"
+          : status === "ignored"
+            ? "已忽略此岗位"
+            : "已加入待申请队列",
+      );
+    } catch {
+      const refreshed = await refreshSelected();
+      setAnnouncement(
+        refreshed
+          ? "状态未更新；已刷新服务端结果"
+          : "状态未更新；请重试",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (jobs.length === 0) {
+    return <div className="state-message">尚无已分析岗位</div>;
+  }
+
+  return (
+    <div className="job-workspace">
+      <aside className="job-queue" aria-label="岗位队列区域">
+        <div className="section-heading">
+          <h2>岗位</h2>
+          <span>{jobs.length}</span>
+        </div>
+        <JobList jobs={jobs} selectedId={selectedId} onSelect={setSelectedId} />
+      </aside>
+      <div className="job-detail-region">
+        {loadingDetail ? (
+          <div className="state-message">正在载入岗位判断…</div>
+        ) : detail ? (
+          <JobDetail detail={detail} busy={busy} onReview={review} />
+        ) : (
+          <div className="state-message">请选择岗位</div>
+        )}
+        {announcement && (
+          <p className="workspace-announcement" role="status" aria-live="polite">
+            {announcement}
+          </p>
+        )}
+      </div>
     </div>
   );
 }

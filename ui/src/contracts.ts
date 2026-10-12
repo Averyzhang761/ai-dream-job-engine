@@ -54,6 +54,24 @@ export interface WorkspaceJobSummary {
   can_mark_ready_to_apply: boolean;
 }
 
+export interface DecisionContribution {
+  subject_id: string;
+  score: number;
+  weight: number;
+  input_ids: string[];
+  job_evidence: string[];
+  candidate_evidence: string[];
+  audit_support: string[];
+}
+
+export interface WorkspaceJobDetail {
+  summary: WorkspaceJobSummary;
+  gaps: Record<GapKind, Gap[]>;
+  preference_contributions: DecisionContribution[];
+  qualification_contributions: DecisionContribution[];
+  trace_evidence: string[];
+}
+
 export interface WorkspaceSnapshot {
   profile_ready: boolean;
   rubric_ready: boolean;
