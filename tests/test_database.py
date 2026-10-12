@@ -210,6 +210,51 @@ def test_job_review_upsert_preserves_one_row_per_analysis(tmp_path) -> None:
     assert store.list_job_reviews() == [replacement]
 
 
+def test_job_review_order_uses_record_updated_at(tmp_path) -> None:
+    store = LocalStore.open(tmp_path / "store.sqlite3")
+    store.initialize()
+    later = JobReviewRecord(
+        analysis_id="analysis-later",
+        status=JobReviewStatus.KEPT,
+        updated_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+    earlier = JobReviewRecord(
+        analysis_id="analysis-earlier",
+        status=JobReviewStatus.KEPT,
+        updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+    store.save_job_review(later)
+    store.save_job_review(earlier)
+
+    assert store.list_job_reviews() == [earlier, later]
+
+
+def test_job_review_rejects_version_one_payload(tmp_path) -> None:
+    database_path = tmp_path / "store.sqlite3"
+    store = LocalStore.open(database_path)
+    store.initialize()
+    review = JobReviewRecord(
+        analysis_id="analysis-1",
+        status=JobReviewStatus.KEPT,
+        updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO job_reviews VALUES (?, ?, ?, ?, ?)",
+            (
+                review.analysis_id,
+                1,
+                review.model_dump_json(),
+                review.updated_at.isoformat(),
+                review.updated_at.isoformat(),
+            ),
+        )
+
+    with pytest.raises(StoreError, match="invalid persisted job review payload"):
+        store.load_job_review(review.analysis_id)
+
+
 def test_review_state_schema_rejects_unexpected_objects(tmp_path) -> None:
     database_path = tmp_path / "store.sqlite3"
     store = LocalStore.open(database_path)

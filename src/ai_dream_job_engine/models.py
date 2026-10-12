@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class DomainModel(BaseModel):
@@ -419,6 +419,13 @@ class JobReviewRecord(DomainModel):
     analysis_id: str = Field(min_length=1)
     status: JobReviewStatus
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @field_validator("updated_at")
+    @classmethod
+    def updated_at_is_aware_utc(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("updated_at must be timezone-aware")
+        return value.astimezone(timezone.utc)
 
 
 class AnalysisSummary(DomainModel):

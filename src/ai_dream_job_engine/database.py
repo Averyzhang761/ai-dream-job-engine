@@ -135,6 +135,7 @@ class LocalStore:
             record.analysis_id,
             record,
             self._utc_timestamp(record.updated_at),
+            updated_at=self._utc_timestamp(record.updated_at),
         )
 
     def load_job_review(self, analysis_id: str) -> JobReviewRecord | None:
@@ -175,8 +176,9 @@ class LocalStore:
         created_at: str,
         *,
         replace_created_at: bool = False,
+        updated_at: str | None = None,
     ) -> None:
-        now = datetime.now(timezone.utc).isoformat()
+        updated_at = updated_at or datetime.now(timezone.utc).isoformat()
         created_at_update = (
             ",\n                    created_at = excluded.created_at"
             if replace_created_at
@@ -198,7 +200,7 @@ class LocalStore:
                     SCHEMA_VERSION,
                     model.model_dump_json(),
                     created_at,
-                    now,
+                    updated_at,
                 ),
             )
 
@@ -277,10 +279,12 @@ class LocalStore:
     ) -> _Model:
         schema_version, payload = row
         try:
-            if schema_version not in (1, SCHEMA_VERSION):
+            legacy_model = model_type in (CandidateProfile, Rubric, AnalysisRecord)
+            if schema_version != SCHEMA_VERSION and not (
+                schema_version == 1 and legacy_model
+            ):
                 raise ValueError(
-                    f"unsupported payload version {schema_version}; "
-                    f"expected 1 or {SCHEMA_VERSION}"
+                    f"unsupported payload version {schema_version}"
                 )
             return model_type.model_validate_json(payload)
         except (TypeError, ValueError) as error:

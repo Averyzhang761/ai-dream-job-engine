@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from pydantic import ValidationError
 
@@ -225,6 +227,30 @@ def test_job_review_status_has_only_supported_values() -> None:
 def test_job_review_record_requires_analysis_id() -> None:
     with pytest.raises(ValidationError):
         JobReviewRecord(status=JobReviewStatus.UNREVIEWED)
+
+
+def test_job_review_record_requires_aware_utc_updated_at() -> None:
+    with pytest.raises(ValidationError, match="timezone-aware"):
+        JobReviewRecord(
+            analysis_id="analysis-1",
+            status=JobReviewStatus.UNREVIEWED,
+            updated_at=datetime(2026, 1, 1),
+        )
+
+    record = JobReviewRecord(
+        analysis_id="analysis-1",
+        status=JobReviewStatus.UNREVIEWED,
+        updated_at=datetime(
+            2026,
+            1,
+            1,
+            1,
+            tzinfo=timezone(timedelta(hours=1)),
+        ),
+    )
+
+    assert record.updated_at == datetime(2026, 1, 1, tzinfo=timezone.utc)
+    assert record.updated_at.tzinfo is timezone.utc
 
 
 def test_evaluation_case_requires_human_labels_before_system_result() -> None:
