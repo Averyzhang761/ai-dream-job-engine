@@ -1,5 +1,5 @@
-import { Brain, RefreshCw, ShieldCheck } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { Brain, Link2Off, RefreshCw, ShieldCheck } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { McpAppBridge } from "../bridge";
 import type {
@@ -30,11 +30,54 @@ function evidenceGroup(claim: CandidateClaim) {
   return "user";
 }
 
-function parseEditedValue(original: unknown, edited: string): unknown {
-  if (typeof original === "number") return Number(edited);
-  if (typeof original === "boolean") return edited.trim().toLowerCase() === "true";
-  if (Array.isArray(original)) return edited.split(/[,，\n]/).map((item) => item.trim()).filter(Boolean);
-  return edited;
+function parseEditedValue(
+  original: unknown,
+  edited: string,
+): { value?: unknown; error?: string } {
+  if (typeof original === "string") return { value: edited };
+  if (typeof original === "number") {
+    const trimmed = edited.trim();
+    const value = Number(trimmed);
+    return trimmed !== "" && Number.isFinite(value)
+      ? { value }
+      : { error: "修改后的数字必须是有限值" };
+  }
+  if (typeof original === "boolean") {
+    const normalized = edited.trim().toLowerCase();
+    if (normalized !== "true" && normalized !== "false") {
+      return { error: "修改后的布尔值只能填写 true 或 false" };
+    }
+    return { value: normalized === "true" };
+  }
+  if (Array.isArray(original)) {
+    try {
+      const value = JSON.parse(edited);
+      return Array.isArray(value)
+        ? { value }
+        : { error: "修改后的列表必须是有效 JSON 数组" };
+    } catch {
+      return { error: "修改后的列表必须是有效 JSON 数组" };
+    }
+  }
+  if (original !== null && typeof original === "object") {
+    try {
+      const value = JSON.parse(edited);
+      return value !== null && typeof value === "object" && !Array.isArray(value)
+        ? { value }
+        : { error: "修改后的对象必须是有效 JSON 对象" };
+    } catch {
+      return { error: "修改后的对象必须是有效 JSON 对象" };
+    }
+  }
+  return { value: edited };
+}
+
+function previewCategories(preview: ClaimPreviewView, claimId: string) {
+  return [
+    preview.added_claim_ids.includes(claimId) ? "新增" : null,
+    preview.changed_claim_ids.includes(claimId) ? "变更" : null,
+    preview.conflicting_claim_ids.includes(claimId) ? "冲突" : null,
+  ].filter((value): value is string => Boolean(value));
 }
 
 export function EvidenceView({
@@ -51,6 +94,12 @@ export function EvidenceView({
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [disconnectSource, setDisconnectSource] = useState<string | null>(null);
+  const [disconnectMode, setDisconnectMode] = useState<"preserve" | "delete">("preserve");
+  const [deleteConfirmed, setDeleteConfirmed] = useState(false);
+  const previewIdRef = useRef(claimPreview?.preview_id);
+  const previewRequestRef = useRef(0);
+  previewIdRef.current = claimPreview?.preview_id;
 
   useEffect(() => {
     let active = true;
@@ -67,7 +116,9 @@ export function EvidenceView({
     setEditedValues({});
     setPreviewUnavailable(false);
     setPreviewCompleted(false);
+    setBusy(false);
     setError("");
+    previewRequestRef.current += 1;
   }, [claimPreview?.preview_id]);
 
   const groups = useMemo(() => {
@@ -78,6 +129,11 @@ export function EvidenceView({
       agent: confirmed.filter((claim) => evidenceGroup(claim) === "agent"),
     };
   }, [initialClaims, profile]);
+
+  const memorySources = useMemo(
+    () => Array.from(new Set(groups.agent.map((claim) => claim.import_origin?.source_agent ?? claim.source_agent).filter((source): source is string => Boolean(source)))),
+    [groups.agent],
+  );
 
   const askAgent = async (regenerate = false) => {
     if (!regenerate && scopes.length === 0) {
@@ -105,16 +161,25 @@ export function EvidenceView({
       setError("请逐条选择接受、修改或拒绝");
       return;
     }
-    const decisions: ClaimDecision[] = claimPreview.candidates.map((claim) => {
+    const decisions: ClaimDecision[] = [];
+    for (const claim of claimPreview.candidates) {
       const action = actions[claim.id];
-      return action === "edit"
-        ? { claim_id: claim.id, action, edited_value: parseEditedValue(claim.value, editedValues[claim.id] ?? displayValue(claim.value)) }
-        : { claim_id: claim.id, action };
-    });
-    if (decisions.some((decision) => decision.action === "edit" && String(decision.edited_value).trim() === "")) {
-      setError("修改后的值不能为空");
-      return;
+      if (action === "edit") {
+        const parsed = parseEditedValue(
+          claim.value,
+          editedValues[claim.id] ?? displayValue(claim.value),
+        );
+        if (parsed.error) {
+          setError(parsed.error);
+          return;
+        }
+        decisions.push({ claim_id: claim.id, action, edited_value: parsed.value });
+      } else {
+        decisions.push({ claim_id: claim.id, action });
+      }
     }
+    const previewId = claimPreview.preview_id;
+    const requestGeneration = ++previewRequestRef.current;
     setBusy(true);
     setError("");
     try {
@@ -122,19 +187,51 @@ export function EvidenceView({
         ? "confirm_agent_memory_import"
         : "confirm_profile_claims";
       const updated = await bridge.callTool<CandidateProfile>(tool, {
-        preview_id: claimPreview.preview_id,
+        preview_id: previewId,
         decisions,
       });
+      if (
+        previewIdRef.current !== previewId ||
+        previewRequestRef.current !== requestGeneration
+      ) return;
       setProfile(updated);
       setActions({});
       setEditedValues({});
       setPreviewCompleted(true);
       setMessage("候选证据已按你的逐条决定更新");
     } catch {
+      if (
+        previewIdRef.current !== previewId ||
+        previewRequestRef.current !== requestGeneration
+      ) return;
       setActions({});
       setEditedValues({});
       setPreviewUnavailable(true);
       setError("预览已失效，请重新生成");
+    } finally {
+      if (
+        previewIdRef.current === previewId &&
+        previewRequestRef.current === requestGeneration
+      ) setBusy(false);
+    }
+  };
+
+  const disconnectMemory = async () => {
+    if (!disconnectSource || (disconnectMode === "delete" && !deleteConfirmed)) return;
+    setBusy(true);
+    setError("");
+    try {
+      const updated = await bridge.callTool<CandidateProfile>("disconnect_agent_memory", {
+        source_agent: disconnectSource,
+        delete_imported: disconnectMode === "delete",
+      });
+      setProfile(updated);
+      setMessage(disconnectMode === "delete" ? "已断开来源并删除其导入证据" : "已断开来源；已导入证据予以保留");
+      setDisconnectSource(null);
+      setDisconnectMode("preserve");
+      setDeleteConfirmed(false);
+    } catch {
+      setError("未能断开 Agent Memory 来源，请重试");
     } finally {
       setBusy(false);
     }
@@ -160,6 +257,8 @@ export function EvidenceView({
           {scopeOptions.map((scope) => <label className="checkbox-field" key={scope}><input type="checkbox" checked={scopes.includes(scope)} onChange={(event) => setScopes(event.target.checked ? [...scopes, scope] : scopes.filter((item) => item !== scope))} />{scope}</label>)}
         </div>
         <button className="secondary-button" type="button" disabled={busy || scopes.length === 0} onClick={() => askAgent(false)}><Brain size={15} aria-hidden="true" />同步 Agent Memory</button>
+        {memorySources.length > 0 && <div className="memory-sources"><strong>已确认来源</strong>{memorySources.map((source) => <button type="button" key={source} onClick={() => { setDisconnectSource(source); setDisconnectMode("preserve"); setDeleteConfirmed(false); }}><Link2Off size={14} aria-hidden="true" />断开 {source}</button>)}</div>}
+        {disconnectSource && <fieldset className="disconnect-panel"><legend>断开 {disconnectSource}</legend><label><input type="radio" name="disconnect-mode" checked={disconnectMode === "preserve"} onChange={() => { setDisconnectMode("preserve"); setDeleteConfirmed(false); }} />保留已导入证据</label><label className="destructive-choice"><input type="radio" name="disconnect-mode" checked={disconnectMode === "delete"} onChange={() => setDisconnectMode("delete")} />删除此来源导入的证据</label>{disconnectMode === "delete" && <label className="destructive-confirm"><input type="checkbox" checked={deleteConfirmed} onChange={(event) => setDeleteConfirmed(event.target.checked)} />我确认删除 {disconnectSource} 导入的证据</label>}<div className="disconnect-actions"><button type="button" onClick={() => setDisconnectSource(null)}>取消</button><button className={disconnectMode === "delete" ? "danger-button" : "secondary-button"} type="button" disabled={busy || (disconnectMode === "delete" && !deleteConfirmed)} onClick={disconnectMemory}>{disconnectMode === "delete" ? "确认删除并断开" : "确认断开"}</button></div></fieldset>}
       </section>
 
       {claimPreview && !previewUnavailable && !previewCompleted && (
@@ -170,6 +269,7 @@ export function EvidenceView({
             {claimPreview.candidates.map((claim) => (
               <fieldset className="claim-review-row" key={claim.id}>
                 <legend>{claim.claim_type}</legend>
+                <div className="preview-categories">{previewCategories(claimPreview, claim.id).map((category) => <span className={`preview-category preview-category--${category === "冲突" ? "conflict" : "change"}`} key={category}>{category}</span>)}</div>
                 <strong>{displayValue(claim.value)}</strong>
                 <p>{claim.provenance || claim.source_quote || "未提供来源说明"}</p>
                 <div className="claim-actions">

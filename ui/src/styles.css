@@ -185,6 +185,27 @@ textarea:focus-visible,
   min-width: 0;
 }
 
+.job-workspace-stack {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.stale-warning,
+.stale-detail-warning {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-left: 3px solid var(--color-warning);
+  color: var(--color-warning);
+  background: var(--color-warning-soft);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.stale-detail-warning {
+  margin-bottom: var(--space-2);
+}
+
 .job-queue,
 .job-detail-region {
   min-width: 0;
@@ -732,6 +753,78 @@ textarea:focus-visible,
   margin: var(--space-3) 0;
 }
 
+.memory-sources {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.memory-sources strong {
+  flex-basis: 100%;
+  font-size: 12px;
+}
+
+.memory-sources button,
+.disconnect-actions button {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 5px;
+  padding: 6px var(--space-2);
+  border: 1px solid var(--color-border-strong);
+  border-radius: 4px;
+  color: var(--color-graphite);
+  background: var(--color-white);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.disconnect-panel {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+}
+
+.disconnect-panel legend {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.disconnect-panel > label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 12px;
+}
+
+.destructive-choice,
+.destructive-confirm {
+  color: var(--color-warning);
+}
+
+.disconnect-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.disconnect-actions .danger-button {
+  border-color: var(--color-warning);
+  color: var(--color-white);
+  background: var(--color-warning);
+}
+
+.disconnect-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 .claim-review-row {
   grid-template-columns: minmax(0, 1fr);
 }
@@ -740,6 +833,30 @@ textarea:focus-visible,
 .claim-review-row p {
   margin: 0;
   overflow-wrap: anywhere;
+}
+
+.preview-categories {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.preview-category {
+  display: inline-flex;
+  width: fit-content;
+  padding: 2px 6px;
+  border: 1px solid color-mix(in srgb, var(--color-status) 35%, white);
+  border-radius: 999px;
+  color: var(--color-status);
+  background: var(--color-status-soft);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.preview-category--conflict {
+  border-color: color-mix(in srgb, var(--color-warning) 35%, white);
+  color: var(--color-warning);
+  background: var(--color-warning-soft);
 }
 
 .claim-review-row p {

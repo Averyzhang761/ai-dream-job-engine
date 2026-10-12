@@ -62,7 +62,7 @@ const preview: ClaimPreviewView = {
   scope: ["项目", "职业偏好"],
   added_claim_ids: ["candidate-a"],
   changed_claim_ids: ["candidate-b"],
-  conflicting_claim_ids: [],
+  conflicting_claim_ids: ["candidate-b"],
 };
 
 function bridge(confirmFails = false) {
@@ -75,7 +75,7 @@ function bridge(confirmFails = false) {
     callTool: async <T,>(name: string, args: object) => {
       calls.push({ name, args });
       if (name === "get_candidate_profile") return structuredClone(profile) as T;
-      if (name.startsWith("confirm_")) {
+      if (name.startsWith("confirm_") || name === "disconnect_agent_memory") {
         if (confirmFails) throw new Error("private preview error");
         return { ...profile, claims: [...profile.claims, { ...resumeClaim, id: "confirmed-new", value: "RAG", source: "user_confirmed" }] } as T;
       }
@@ -154,4 +154,126 @@ describe("EvidenceView", () => {
     await user.click(screen.getByRole("button", { name: "重新生成预览" }));
     expect(mock.messages.at(-1)).toContain("重新生成");
   });
+
+  it("shows server preview categories", async () => {
+    render(<EvidenceView bridge={bridge().value} initialClaims={profile.claims} claimPreview={preview} />);
+    const review = await screen.findByRole("region", { name: "候选证据确认" });
+    expect(within(review).getByText("新增")).toBeVisible();
+    expect(within(review).getByText("变更")).toBeVisible();
+    expect(within(review).getByText("冲突")).toBeVisible();
+  });
+
+  it("disconnects an Agent source with explicit preserve or destructive delete choices", async () => {
+    const user = userEvent.setup();
+    const mock = bridge();
+    render(<EvidenceView bridge={mock.value} initialClaims={profile.claims} claimPreview={null} />);
+    await screen.findByText("Production AI");
+
+    await user.click(screen.getByRole("button", { name: "断开 Codex" }));
+    await user.click(screen.getByRole("radio", { name: "保留已导入证据" }));
+    await user.click(screen.getByRole("button", { name: "确认断开" }));
+    await waitFor(() => expect(mock.calls).toContainEqual({
+      name: "disconnect_agent_memory",
+      args: { source_agent: "Codex", delete_imported: false },
+    }));
+
+    await user.click(screen.getByRole("button", { name: "断开 Codex" }));
+    await user.click(screen.getByRole("radio", { name: "删除此来源导入的证据" }));
+    expect(screen.getByRole("button", { name: "确认删除并断开" })).toBeDisabled();
+    await user.click(screen.getByRole("checkbox", { name: "我确认删除 Codex 导入的证据" }));
+    await user.click(screen.getByRole("button", { name: "确认删除并断开" }));
+    await waitFor(() => expect(mock.calls).toContainEqual({
+      name: "disconnect_agent_memory",
+      args: { source_agent: "Codex", delete_imported: true },
+    }));
+  });
+
+  it("does not let an old preview response hide a newer preview", async () => {
+    const user = userEvent.setup();
+    const pending = deferred<CandidateProfile>();
+    const calls: Array<{ name: string; args: object }> = [];
+    const raceBridge: McpAppBridge = {
+      initialize: async () => undefined,
+      subscribeToToolResults: () => () => undefined,
+      sendMessage: async () => undefined,
+      callTool: async <T,>(name: string, args: object) => {
+        calls.push({ name, args });
+        if (name === "get_candidate_profile") return profile as T;
+        return pending.promise as Promise<T>;
+      },
+    };
+    const previewB = {
+      ...preview,
+      preview_id: "b".repeat(32),
+      candidates: [{ ...preview.candidates[0], id: "candidate-new", value: "New B claim" }],
+      added_claim_ids: ["candidate-new"],
+      changed_claim_ids: [],
+    };
+    const rendered = render(<EvidenceView bridge={raceBridge} initialClaims={profile.claims} claimPreview={preview} />);
+    const firstReview = await screen.findByRole("region", { name: "候选证据确认" });
+    for (const row of within(firstReview).getAllByRole("group")) {
+      await user.click(within(row).getByRole("radio", { name: "接受" }));
+    }
+    await user.click(within(firstReview).getByRole("button", { name: "提交确认" }));
+
+    rendered.rerender(<EvidenceView bridge={raceBridge} initialClaims={profile.claims} claimPreview={previewB} />);
+    expect(await screen.findByText("New B claim")).toBeVisible();
+    pending.resolve(profile);
+    await waitFor(() => expect(screen.getByText("New B claim")).toBeVisible());
+    expect(screen.getByRole("region", { name: "候选证据确认" })).toBeVisible();
+    expect(calls.filter((call) => call.name === "confirm_agent_memory_import")).toHaveLength(1);
+  });
+
+  it("rejects invalid edited numbers and booleans while preserving strings", async () => {
+    const user = userEvent.setup();
+    const typedPreview: ClaimPreviewView = {
+      ...preview,
+      candidates: [
+        { ...preview.candidates[0], id: "number", value: 3 },
+        { ...preview.candidates[0], id: "boolean", value: true },
+        { ...preview.candidates[0], id: "string", value: "  exact text  " },
+      ],
+      added_claim_ids: ["number", "boolean", "string"],
+      changed_claim_ids: [],
+    };
+    const mock = bridge();
+    render(<EvidenceView bridge={mock.value} initialClaims={profile.claims} claimPreview={typedPreview} />);
+    const rows = await screen.findAllByRole("group");
+    for (const row of rows) await user.click(within(row).getByRole("radio", { name: "修改" }));
+    const edits = screen.getAllByLabelText("修改后的值");
+    await user.clear(edits[0]);
+    await user.type(edits[0], "Infinity");
+    await user.clear(edits[1]);
+    await user.type(edits[1], "yes");
+    await user.click(screen.getByRole("button", { name: "提交确认" }));
+    expect(await screen.findByText(/数字必须是有限值/)).toBeVisible();
+    expect(mock.calls.filter((call) => call.name.startsWith("confirm_"))).toHaveLength(0);
+
+    await user.clear(edits[0]);
+    await user.type(edits[0], "4.5");
+    await user.click(screen.getByRole("button", { name: "提交确认" }));
+    expect(await screen.findByText(/布尔值只能填写 true 或 false/)).toBeVisible();
+    expect(mock.calls.filter((call) => call.name.startsWith("confirm_"))).toHaveLength(0);
+
+    await user.clear(edits[1]);
+    await user.type(edits[1], "false");
+    await user.click(screen.getByRole("button", { name: "提交确认" }));
+    await waitFor(() => expect(mock.calls).toContainEqual({
+      name: "confirm_agent_memory_import",
+      args: {
+        preview_id: typedPreview.preview_id,
+        decisions: [
+          { claim_id: "number", action: "edit", edited_value: 4.5 },
+          { claim_id: "boolean", action: "edit", edited_value: false },
+          { claim_id: "string", action: "edit", edited_value: "  exact text  " },
+        ],
+      },
+    }));
+  });
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => { resolve = next; });
+  return { promise, resolve };
+}

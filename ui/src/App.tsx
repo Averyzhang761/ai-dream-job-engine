@@ -46,6 +46,7 @@ export function App({ bridge: providedBridge }: AppProps) {
   const [payload, setPayload] = useState<WorkspaceAppPayload | null>(null);
   const [selectedAnalysisId, setSelectedAnalysisId] = useState<string | null>(null);
   const [decisionRefresh, setDecisionRefresh] = useState(0);
+  const [staleJobIds, setStaleJobIds] = useState<Set<string>>(() => new Set());
   const [isNarrow, setIsNarrow] = useState(() => window.innerWidth <= 480);
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
@@ -160,7 +161,20 @@ export function App({ bridge: providedBridge }: AppProps) {
               selectedAnalysisId={selectedAnalysisId}
               onSelectedAnalysisChange={setSelectedAnalysisId}
               decisionRefresh={decisionRefresh}
-              onDecisionRecomputed={() => setDecisionRefresh((value) => value + 1)}
+              staleJobIds={staleJobIds}
+              onRubricSaved={() => {
+                setStaleJobIds(
+                  new Set(payload?.snapshot.jobs.map((job) => job.analysis_id) ?? []),
+                );
+              }}
+              onDecisionRecomputed={(analysisId) => {
+                setStaleJobIds((current) => {
+                  const next = new Set(current);
+                  next.delete(analysisId);
+                  return next;
+                });
+                setDecisionRefresh((value) => value + 1);
+              }}
             />
           )}
         </section>
@@ -185,6 +199,8 @@ function ViewContent({
   selectedAnalysisId,
   onSelectedAnalysisChange,
   decisionRefresh,
+  staleJobIds,
+  onRubricSaved,
   onDecisionRecomputed,
 }: {
   activeView: ViewId;
@@ -194,7 +210,9 @@ function ViewContent({
   selectedAnalysisId: string | null;
   onSelectedAnalysisChange: (analysisId: string | null) => void;
   decisionRefresh: number;
-  onDecisionRecomputed: () => void;
+  staleJobIds: Set<string>;
+  onRubricSaved: () => void;
+  onDecisionRecomputed: (analysisId: string) => void;
 }) {
   if (connection === "unavailable") {
     return (
@@ -219,7 +237,7 @@ function ViewContent({
         </div>
       );
     }
-    return <JobWorkspace bridge={bridge} initialJobs={payload.snapshot.jobs} decisionRefresh={decisionRefresh} onSelectedAnalysisChange={onSelectedAnalysisChange} />;
+    return <JobWorkspace bridge={bridge} initialJobs={payload.snapshot.jobs} decisionRefresh={decisionRefresh} staleJobIds={staleJobIds} onSelectedAnalysisChange={onSelectedAnalysisChange} />;
   }
 
   if (activeView === "standards") {
@@ -227,7 +245,10 @@ function ViewContent({
       <RubricView
         bridge={bridge}
         selectedAnalysisId={selectedAnalysisId}
-        onRecomputed={() => onDecisionRecomputed()}
+        staleJobCount={staleJobIds.size}
+        selectedJobIsStale={Boolean(selectedAnalysisId && staleJobIds.has(selectedAnalysisId))}
+        onSaved={onRubricSaved}
+        onRecomputed={onDecisionRecomputed}
       />
     ) : <div className="state-message">尚未初始化岗位标准</div>;
   }
@@ -245,11 +266,13 @@ function JobWorkspace({
   bridge,
   initialJobs,
   decisionRefresh,
+  staleJobIds,
   onSelectedAnalysisChange,
 }: {
   bridge: McpAppBridge;
   initialJobs: WorkspaceJobSummary[];
   decisionRefresh: number;
+  staleJobIds: Set<string>;
   onSelectedAnalysisChange: (analysisId: string | null) => void;
 }) {
   const [jobs, setJobs] = useState(initialJobs);
@@ -396,7 +419,13 @@ function JobWorkspace({
   }
 
   return (
-    <div className="job-workspace">
+    <div className="job-workspace-stack">
+      {staleJobIds.size > 0 && (
+        <p className="stale-warning" role="status">
+          标准已更改：{staleJobIds.size} 个岗位仍显示旧结果
+        </p>
+      )}
+      <div className="job-workspace">
       <aside className="job-queue" aria-label="岗位队列区域">
         <div className="section-heading">
           <h2>岗位</h2>
@@ -421,7 +450,14 @@ function JobWorkspace({
             </button>
           </div>
         ) : detail ? (
-          <JobDetail detail={detail} busy={busy} onReview={review} />
+          <>
+            {staleJobIds.has(detail.summary.analysis_id) && (
+              <p className="stale-detail-warning">
+                此岗位结果基于旧标准，请先重新计算。
+              </p>
+            )}
+            <JobDetail detail={detail} busy={busy} onReview={review} />
+          </>
         ) : (
           <div className="state-message">请选择岗位</div>
         )}
@@ -430,6 +466,7 @@ function JobWorkspace({
             {announcement}
           </p>
         )}
+      </div>
       </div>
     </div>
   );

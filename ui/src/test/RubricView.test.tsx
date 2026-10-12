@@ -53,7 +53,7 @@ const rubric: Rubric = {
   },
 };
 
-function bridge() {
+function bridge(activeRubric: Rubric = rubric) {
   const calls: Array<{ name: string; args: object }> = [];
   const value: McpAppBridge = {
     initialize: async () => undefined,
@@ -61,8 +61,8 @@ function bridge() {
     sendMessage: async () => undefined,
     callTool: async <T,>(name: string, args: object) => {
       calls.push({ name, args });
-      if (name === "get_rubric") return structuredClone(rubric) as T;
-      if (name === "update_rubric") return { ...rubric, revision: "r2" } as T;
+      if (name === "get_rubric") return structuredClone(activeRubric) as T;
+      if (name === "update_rubric") return { ...activeRubric, revision: "r2" } as T;
       if (name === "recompute_decision") return { id: "analysis-1" } as T;
       throw new Error("unexpected tool");
     },
@@ -80,6 +80,8 @@ describe("RubricView", () => {
       <RubricView
         bridge={mock.value}
         selectedAnalysisId="analysis-1"
+        staleJobCount={1}
+        selectedJobIsStale
         onRecomputed={vi.fn()}
       />,
     );
@@ -130,6 +132,8 @@ describe("RubricView", () => {
       <RubricView
         bridge={mock.value}
         selectedAnalysisId="analysis-1"
+        staleJobCount={1}
+        selectedJobIsStale
         onRecomputed={onRecomputed}
       />,
     );
@@ -146,5 +150,64 @@ describe("RubricView", () => {
       }),
     );
     expect(onRecomputed).toHaveBeenCalledWith("analysis-1");
+  });
+
+  it("rejects enum defaults outside declared values before a tool call", async () => {
+    const user = userEvent.setup();
+    const enumRubric = structuredClone(rubric);
+    enumRubric.facts[0] = {
+      ...enumRubric.facts[0],
+      data_type: "enum",
+      enum_values: ["remote", "hybrid"],
+      missing_policy: "default",
+      default_value: "remote",
+    };
+    const mock = bridge(enumRubric);
+    render(<RubricView bridge={mock.value} selectedAnalysisId={null} onRecomputed={vi.fn()} />);
+
+    const input = await screen.findByLabelText("事实默认值 location");
+    await user.clear(input);
+    await user.type(input, "onsite");
+    await user.click(screen.getByRole("button", { name: "保存标准" }));
+
+    expect(await screen.findByText(/枚举默认值必须属于已声明选项/)).toBeVisible();
+    expect(mock.calls.filter((call) => call.name === "update_rubric")).toHaveLength(0);
+  });
+
+  it("rejects non-finite numeric and invalid boolean defaults before a tool call", async () => {
+    const user = userEvent.setup();
+    const numericRubric = structuredClone(rubric);
+    numericRubric.facts[0] = {
+      ...numericRubric.facts[0],
+      data_type: "number",
+      missing_policy: "default",
+      default_value: 1,
+      candidate_comparison: "candidate_at_least",
+    };
+    const numericMock = bridge(numericRubric);
+    render(<RubricView bridge={numericMock.value} selectedAnalysisId={null} onRecomputed={vi.fn()} />);
+    const numberInput = await screen.findByLabelText("事实默认值 location");
+    await user.clear(numberInput);
+    await user.type(numberInput, "Infinity");
+    await user.click(screen.getByRole("button", { name: "保存标准" }));
+    expect(await screen.findByText(/数字默认值必须是有限数字/)).toBeVisible();
+    expect(numericMock.calls.filter((call) => call.name === "update_rubric")).toHaveLength(0);
+
+    cleanup();
+    const booleanRubric = structuredClone(rubric);
+    booleanRubric.facts[0] = {
+      ...booleanRubric.facts[0],
+      data_type: "boolean",
+      missing_policy: "default",
+      default_value: "false" as unknown as boolean,
+    };
+    const booleanMock = bridge(booleanRubric);
+    render(<RubricView bridge={booleanMock.value} selectedAnalysisId={null} onRecomputed={vi.fn()} />);
+    await screen.findByLabelText("事实默认值 location");
+    await user.clear(screen.getByLabelText("事实名称 location"));
+    await user.type(screen.getByLabelText("事实名称 location"), "地点要求");
+    await user.click(screen.getByRole("button", { name: "保存标准" }));
+    expect(await screen.findByText(/布尔默认值必须是 true 或 false/)).toBeVisible();
+    expect(booleanMock.calls.filter((call) => call.name === "update_rubric")).toHaveLength(0);
   });
 });

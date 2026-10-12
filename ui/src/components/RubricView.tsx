@@ -14,6 +14,9 @@ import type {
 interface RubricViewProps {
   bridge: McpAppBridge;
   selectedAnalysisId: string | null;
+  staleJobCount?: number;
+  selectedJobIsStale?: boolean;
+  onSaved?: () => void;
   onRecomputed: (analysisId: string) => void;
 }
 
@@ -85,16 +88,49 @@ function splitList(value: string) {
   return value.split(/[,，\n]/).map((item) => item.trim()).filter(Boolean);
 }
 
-function parseDefaultValue(fact: FactDefinition, value: string): unknown {
+function parseDefaultInput(fact: FactDefinition, value: string): unknown {
   if (fact.data_type === "boolean") return value === "true";
-  if (fact.data_type === "number") return value === "" ? Number.NaN : Number(value);
+  if (fact.data_type === "number") return value;
   if (fact.data_type === "list") return splitList(value);
   return value;
+}
+
+function normalizedFact(fact: FactDefinition): FactDefinition {
+  if (fact.default_value === null || fact.data_type !== "number") return fact;
+  return { ...fact, default_value: Number(fact.default_value) };
+}
+
+function factDefaultError(fact: FactDefinition): string | null {
+  if (fact.default_value === null) {
+    return fact.missing_policy === "default" ? "配置默认值时不能为空" : null;
+  }
+  if (fact.data_type === "number") {
+    const raw = fact.default_value;
+    if ((typeof raw !== "number" && typeof raw !== "string") || String(raw).trim() === "" || !Number.isFinite(Number(raw))) {
+      return "数字默认值必须是有限数字";
+    }
+  }
+  if (fact.data_type === "boolean" && typeof fact.default_value !== "boolean") {
+    return "布尔默认值必须是 true 或 false";
+  }
+  if (fact.data_type === "text" && typeof fact.default_value !== "string") {
+    return "文本默认值必须是字符串";
+  }
+  if (fact.data_type === "enum" && (typeof fact.default_value !== "string" || !fact.enum_values.includes(fact.default_value))) {
+    return "枚举默认值必须属于已声明选项";
+  }
+  if (fact.data_type === "list" && !Array.isArray(fact.default_value)) {
+    return "列表默认值必须是列表";
+  }
+  return null;
 }
 
 export function RubricView({
   bridge,
   selectedAnalysisId,
+  staleJobCount = 0,
+  selectedJobIsStale = false,
+  onSaved = () => undefined,
   onRecomputed,
 }: RubricViewProps) {
   const [baseline, setBaseline] = useState<Rubric | null>(null);
@@ -102,7 +138,6 @@ export function RubricView({
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
-  const [needsRecompute, setNeedsRecompute] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -152,8 +187,9 @@ export function RubricView({
     if (new Set(draft.facts.map((fact) => fact.id)).size !== draft.facts.length || new Set(draft.dimensions.map((dimension) => dimension.id)).size !== draft.dimensions.length) {
       return "事实字段和价值维度的 ID 不能重复";
     }
+    const defaultError = draft.facts.map(factDefaultError).find(Boolean);
+    if (defaultError) return defaultError;
     if (draft.facts.some((fact) =>
-      (fact.missing_policy === "default" && (fact.default_value === null || (typeof fact.default_value === "number" && !Number.isFinite(fact.default_value)))) ||
       (fact.data_type === "enum" && fact.enum_values.length === 0) ||
       (fact.candidate_comparison === "none" && fact.qualification_weight !== 0) ||
       (fact.candidate_comparison !== "none" && fact.qualification_weight <= 0) ||
@@ -194,7 +230,8 @@ export function RubricView({
     const patch: RubricPatch = {};
     const factUpdates: Record<string, Partial<FactDefinition>> = {};
     draft.facts.forEach((fact, index) => {
-      const changes = index < baseline.facts.length ? changedFields(baseline.facts[index], fact) : Object.fromEntries(Object.entries(fact).filter(([key]) => key !== "id"));
+      const normalized = normalizedFact(fact);
+      const changes = index < baseline.facts.length ? changedFields(baseline.facts[index], normalized) : Object.fromEntries(Object.entries(normalized).filter(([key]) => key !== "id"));
       if (Object.keys(changes).length) factUpdates[fact.id] = changes;
     });
     const dimensionUpdates: Record<string, Partial<ValueDimension>> = {};
@@ -216,7 +253,7 @@ export function RubricView({
       const updated = await bridge.callTool<Rubric>("update_rubric", { patch });
       setBaseline(updated);
       setDraft(structuredClone(updated));
-      setNeedsRecompute(true);
+      onSaved();
       setStatus("标准已保存；现有岗位需要重新计算");
     } catch {
       setError("标准未保存，请检查字段后重试");
@@ -231,7 +268,6 @@ export function RubricView({
     setError("");
     try {
       await bridge.callTool("recompute_decision", { analysis_id: selectedAnalysisId });
-      setNeedsRecompute(false);
       setStatus("当前岗位已按新标准重新计算");
       onRecomputed(selectedAnalysisId);
     } catch {
@@ -264,7 +300,7 @@ export function RubricView({
               <label>缺失处理<select value={fact.missing_policy} onChange={(event) => updateFact(index, { missing_policy: event.target.value as FactDefinition["missing_policy"] })}><option value="unknown">标记未知</option><option value="default">使用默认值</option></select></label>
               <label className="checkbox-field"><input type="checkbox" checked={fact.requires_evidence} onChange={(event) => updateFact(index, { requires_evidence: event.target.checked })} />要求 JD 原文证据</label>
               <label>枚举值（逗号分隔）<input value={fact.enum_values.join(", ")} onChange={(event) => updateFact(index, { enum_values: splitList(event.target.value) })} /></label>
-              <label>默认值{fact.data_type === "boolean" ? <select disabled={fact.missing_policy !== "default"} value={String(fact.default_value ?? false)} onChange={(event) => updateFact(index, { default_value: event.target.value === "true" })}><option value="false">否</option><option value="true">是</option></select> : <input disabled={fact.missing_policy !== "default"} value={fact.default_value === null ? "" : Array.isArray(fact.default_value) ? fact.default_value.join(", ") : String(fact.default_value)} onChange={(event) => updateFact(index, { default_value: parseDefaultValue(fact, event.target.value) })} />}</label>
+              <label>默认值{fact.data_type === "boolean" ? <select aria-label={`事实默认值 ${fact.id}`} disabled={fact.missing_policy !== "default"} value={String(fact.default_value ?? false)} onChange={(event) => updateFact(index, { default_value: event.target.value === "true" })}><option value="false">否</option><option value="true">是</option></select> : <input aria-label={`事实默认值 ${fact.id}`} disabled={fact.missing_policy !== "default"} value={fact.default_value === null ? "" : Array.isArray(fact.default_value) ? fact.default_value.join(", ") : String(fact.default_value)} onChange={(event) => updateFact(index, { default_value: parseDefaultInput(fact, event.target.value) })} />}</label>
             </fieldset>
           ))}
         </div>
@@ -298,7 +334,7 @@ export function RubricView({
 
       {error && <p className="form-message form-message--error" role="alert">{error}</p>}
       {status && <p className="form-message" role="status">{status}</p>}
-      {needsRecompute && <div className="recompute-bar"><span>已分析岗位仍显示旧标准结果。</span><button type="button" disabled={!selectedAnalysisId || busy} onClick={recompute}><RotateCcw size={14} aria-hidden="true" />重新计算当前岗位</button>{!selectedAnalysisId && <small>请先在“岗位”中选择一项。</small>}</div>}
+      {staleJobCount > 0 && <div className="recompute-bar"><span>{staleJobCount} 个岗位需要重新计算。</span><button type="button" disabled={!selectedAnalysisId || !selectedJobIsStale || busy} onClick={recompute}><RotateCcw size={14} aria-hidden="true" />重新计算当前岗位</button>{!selectedAnalysisId && <small>请先在“岗位”中选择一项。</small>}{selectedAnalysisId && !selectedJobIsStale && <small>当前岗位已是最新结果。</small>}</div>}
     </div>
   );
 }

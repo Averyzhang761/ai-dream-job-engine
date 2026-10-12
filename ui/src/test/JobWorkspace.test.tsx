@@ -8,11 +8,48 @@ import { App } from "../App";
 import type { McpAppBridge } from "../bridge";
 import type {
   Gap,
+  Rubric,
   ToolResultEnvelope,
   WorkspaceAppPayload,
   WorkspaceJobDetail,
   WorkspaceJobSummary,
 } from "../contracts";
+
+const editableRubric: Rubric = {
+  id: "default",
+  version: "1",
+  revision: "r1",
+  facts: [{
+    id: "location",
+    name: "地点",
+    definition: "岗位地点",
+    data_type: "text",
+    extraction_instructions: "提取地点",
+    requires_evidence: true,
+    missing_policy: "unknown",
+    default_value: null,
+    enum_values: [],
+    candidate_comparison: "exact",
+    qualification_weight: 1,
+  }],
+  dimensions: [{
+    id: "location_fit",
+    name: "地点匹配",
+    definition: "地点是否合适",
+    examples: [],
+    fact_ids: ["location"],
+    signal_ids: [],
+    weight: 1,
+    scoring_direction: "higher_is_better",
+    positive_keywords: [],
+    negative_keywords: [],
+    hard_constraint: false,
+    threshold: null,
+    explanation_template: null,
+  }],
+  questions: [],
+  recommendation_thresholds: { priority_apply: 0.8, apply_after_review: 0.6, hold: 0.3, skip: 0 },
+};
 
 const evidenceGap: Gap = {
   kind: "evidence_gap",
@@ -343,5 +380,45 @@ describe("job workspace", () => {
     expect(await screen.findByText("服务端原因：存在硬性阻断")).toBeVisible();
     expect(screen.getByText("服务端原因：存在未解决证据差距")).toBeVisible();
     expect(screen.queryByText("服务端判定此岗位暂不可加入待申请")).not.toBeInTheDocument();
+  });
+
+  it("keeps per-job rubric stale warnings across tabs and clears only the recomputed job", async () => {
+    const user = userEvent.setup();
+    const first = summary({ analysis_id: "first", title: "First stale job" });
+    const second = summary({ analysis_id: "second", title: "Second stale job" });
+    const calls: Array<{ name: string; args: object }> = [];
+    const testBridge = bridgeWithPayload(payload([first, second]), async (name, args) => {
+      calls.push({ name, args });
+      if (name === "get_workspace_job") {
+        const analysisId = (args as { analysis_id: string }).analysis_id;
+        return detail(analysisId === "first" ? first : second);
+      }
+      if (name === "get_rubric") return structuredClone(editableRubric);
+      if (name === "update_rubric") return { ...editableRubric, revision: "r2" };
+      if (name === "recompute_decision") return { id: (args as { analysis_id: string }).analysis_id };
+      throw new Error("unexpected");
+    });
+    render(<App bridge={testBridge} />);
+    await screen.findByRole("heading", { name: "First stale job" });
+
+    await user.click(screen.getByRole("tab", { name: "我的标准" }));
+    const factName = await screen.findByLabelText("事实名称 location");
+    await user.clear(factName);
+    await user.type(factName, "目标地点");
+    await user.click(screen.getByRole("button", { name: "保存标准" }));
+    expect(await screen.findByText(/2 个岗位需要重新计算/)).toBeVisible();
+
+    await user.click(screen.getByRole("tab", { name: "岗位" }));
+    expect(await screen.findByText("标准已更改：2 个岗位仍显示旧结果")).toBeVisible();
+    expect(screen.getByText("此岗位结果基于旧标准，请先重新计算。" )).toBeVisible();
+
+    await user.click(screen.getByRole("tab", { name: "我的标准" }));
+    await user.click(await screen.findByRole("button", { name: "重新计算当前岗位" }));
+    expect(await screen.findByText(/1 个岗位需要重新计算/)).toBeVisible();
+
+    await user.click(screen.getByRole("tab", { name: "岗位" }));
+    expect(await screen.findByText("标准已更改：1 个岗位仍显示旧结果")).toBeVisible();
+    expect(screen.queryByText("此岗位结果基于旧标准，请先重新计算。" )).not.toBeInTheDocument();
+    expect(calls).toContainEqual({ name: "recompute_decision", args: { analysis_id: "first" } });
   });
 });
