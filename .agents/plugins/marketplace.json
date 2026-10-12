@@ -1,0 +1,20 @@
+{
+  "name": "ai-dream-job-engine-local",
+  "interface": {
+    "displayName": "AI Dream Job Engine Local"
+  },
+  "plugins": [
+    {
+      "name": "ai-dream-job-engine",
+      "source": {
+        "source": "local",
+        "path": "./dist/codex-plugin"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

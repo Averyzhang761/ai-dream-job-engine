@@ -49,24 +49,61 @@ The helper script requires [`uv`](https://docs.astral.sh/uv/). A clean environme
 python -m ai_dream_job_engine.mcp_server
 ```
 
-### Local Codex setup
+### Local Codex plugin installation
 
-The repository contains `.codex-plugin/plugin.json` and `.mcp.json`. For local
-development, open this repository as the Codex project after completing the
-build above. The project MCP configuration starts `./scripts/start-mcp.sh` from
-the repository root. Start a new Codex conversation after enabling or changing
-the plugin so its skill and MCP tools are reloaded.
+This repository is a local Codex marketplace and contains one plugin. From the
+repository root, build the UI, register the marketplace, and install the
+unambiguous local selector:
 
-For a packaged install, publish or add the repository through a Codex plugin
-marketplace, then install `ai-dream-job-engine` from that marketplace with
-`codex plugin add`. The current repository is not yet listed in a public
-marketplace, so there is intentionally no public install selector to copy.
+```bash
+npm ci
+npm run ui:build
+./scripts/build-codex-plugin.sh
+codex plugin marketplace add "$PWD"
+codex plugin add ai-dream-job-engine@ai-dream-job-engine-local
+```
+
+The two `codex plugin` commands intentionally update the current user's Codex
+marketplace and plugin configuration; the repository never runs them during
+build, test, or server startup. The bundle step writes only runtime files to
+ignored `dist/codex-plugin`; it excludes the development virtual environment,
+Node modules, tests, and local data. After installation, fully quit and reopen Codex
+Desktop, open this repository as the project, and start a new conversation so
+the skill and MCP server are loaded. Ask the Agent to open the AI Dream Job
+Engine workspace. Re-run `codex plugin add
+ai-dream-job-engine@ai-dream-job-engine-local` after rebuilding a version that
+you want Codex to install.
 
 To verify the server independently of Codex, run `./scripts/start-mcp.sh` with
 an MCP Inspector or client. The render entrypoint is `open_job_workspace`; its
 resource is `ui://ai-dream-job-engine/workspace-v1.html` with media type
 `text/html;profile=mcp-app`. Existing non-UI tools remain callable when a host
 cannot render MCP Apps.
+
+The startup script uses `uv run --locked`, so it refuses to resolve a dependency
+set different from the tracked `uv.lock`. Check and reproduce the lock plus MCP
+stdio transcript with:
+
+```bash
+uv lock --check
+python scripts/verify_mcp_stdio.py \
+  --output output/playwright/mcp-protocol-verification.json
+```
+
+To verify the built wheel rather than an editable checkout, use a fresh
+temporary environment and point the same stdio verifier at its interpreter:
+
+```bash
+WHEEL_SMOKE_ROOT="$(mktemp -d)"
+mkdir -p "$WHEEL_SMOKE_ROOT/dist"
+python -m pip wheel . --no-deps --no-build-isolation \
+  --wheel-dir "$WHEEL_SMOKE_ROOT/dist"
+python -m venv "$WHEEL_SMOKE_ROOT/venv"
+"$WHEEL_SMOKE_ROOT/venv/bin/python" -m pip install \
+  "$WHEEL_SMOKE_ROOT"/dist/ai_dream_job_engine-*.whl
+python scripts/verify_mcp_stdio.py \
+  --python "$WHEEL_SMOKE_ROOT/venv/bin/python"
+```
 
 ## Model configuration
 
@@ -89,6 +126,21 @@ Agent memory is never silently imported. The user previews proposed claims, choo
 fills a form, or submits an application. Browser login handoff, automatic job
 search, Gmail synchronization, form filling, and application submission remain
 deferred and require separate consent-preserving designs.
+
+### Manual 30-second acceptance
+
+The automated harness measures interaction latency, not human comprehension.
+To perform the product acceptance check, start with one already analyzed,
+synthetic or explicitly approved JD visible in the default `岗位` view:
+
+1. Start a stopwatch when the populated workspace becomes visible.
+2. Without assistance, state the recommendation and the leading unresolved gap.
+3. Open that gap's evidence and identify the JD and candidate evidence shown.
+4. Choose `保留` or `忽略`, then stop the timer.
+
+Record the elapsed time and whether any help was needed. The 30-second target is
+met only when a person completes all four steps in at most 30 seconds without
+help locating a control.
 
 For a network-free harness smoke test, run:
 
