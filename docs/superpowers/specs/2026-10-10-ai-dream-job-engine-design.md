@@ -1,6 +1,6 @@
 # AI Dream Job Engine 设计规格
 
-状态：等待用户审阅（已纳入 MCP App UI）
+状态：已批准（2026-10-11，已纳入 MCP App UI）
 
 ## 1. 产品定义
 
