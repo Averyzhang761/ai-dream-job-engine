@@ -397,6 +397,7 @@ class JobAnalysisService:
             recomputed = safety.validate(
                 existing.model_copy(
                     update={
+                        "decision_revision": existing.decision_revision + 1,
                         "result": result,
                         "trace": trace,
                         "decision_surface": _surface_manifest(
@@ -449,7 +450,7 @@ class JobAnalysisService:
                 created_at=record.created_at,
             )
             for record in self._store_call(self._store.list_analyses)
-            if record.status == "success" and record.result is not None
+            if _is_integrity_valid_success(record)
         ]
 
     def _active_inputs(self) -> tuple[CandidateProfile, Rubric]:
@@ -868,6 +869,16 @@ def _validate_stored_record_or_raise(record: AnalysisRecord) -> None:
         failed = True
     if failed:
         raise AnalysisServiceError(_TRACE_CATEGORY, _TRACE_MESSAGE) from None
+
+
+def _is_integrity_valid_success(record: AnalysisRecord) -> bool:
+    if record.status != "success" or record.result is None:
+        return False
+    try:
+        _validate_stored_record(record)
+    except Exception:
+        return False
+    return True
 
 
 def _parse_jd_ref(

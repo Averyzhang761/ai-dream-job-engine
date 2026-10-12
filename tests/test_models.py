@@ -253,6 +253,26 @@ def test_job_review_record_requires_aware_utc_updated_at() -> None:
     assert record.updated_at.tzinfo is timezone.utc
 
 
+def test_decision_revision_defaults_preserve_legacy_payloads() -> None:
+    analysis = AnalysisRecord.model_validate(
+        {
+            "id": "analysis-1",
+            "input_hash": "sha256:example",
+            "status": "failed",
+            "latency_ms": 0,
+        }
+    )
+    review = JobReviewRecord.model_validate(
+        {
+            "analysis_id": "analysis-1",
+            "status": "ready_to_apply",
+        }
+    )
+
+    assert analysis.decision_revision == 1
+    assert review.decision_revision is None
+
+
 def test_evaluation_case_requires_human_labels_before_system_result() -> None:
     assert EvaluationCase.model_fields["human_recommendation"].is_required()
     assert EvaluationCase.model_fields["human_gap_labels"].is_required()

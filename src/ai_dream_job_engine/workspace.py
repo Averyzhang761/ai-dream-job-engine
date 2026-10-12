@@ -102,11 +102,14 @@ class WorkspaceApplication:
             )
 
         reviews = {
-            review.analysis_id: review.status
+            review.analysis_id: review
             for review in self._store_call(self._store.list_job_reviews)
         }
         jobs = [
-            self._summary(record, reviews.get(record.id, JobReviewStatus.UNREVIEWED))
+            self._summary(
+                record,
+                _effective_review_status(record, reviews.get(record.id)),
+            )
             for record in self._valid_analyses()
         ]
         jobs.sort(key=lambda item: (item.created_at, item.analysis_id), reverse=True)
@@ -120,14 +123,9 @@ class WorkspaceApplication:
         )
 
     def get_job_detail(self, analysis_id: str) -> WorkspaceJobDetail:
-        records = self._store_call(self._store.list_analyses)
-        record = next((item for item in records if item.id == analysis_id), None)
-        if record is None:
-            raise WorkspaceError(ANALYSIS_NOT_FOUND)
-        if not self._is_valid(record):
-            raise WorkspaceError(ANALYSIS_UNAVAILABLE)
+        record = self._get_valid_record(analysis_id)
         review = self._store_call(lambda: self._store.load_job_review(analysis_id))
-        status = review.status if review is not None else JobReviewStatus.UNREVIEWED
+        status = _effective_review_status(record, review)
         result = record.result
         trace = record.trace
         if result is None or trace is None:
@@ -150,18 +148,35 @@ class WorkspaceApplication:
     def set_review_status(
         self, analysis_id: str, status: JobReviewStatus
     ) -> WorkspaceJobDetail:
-        detail = self.get_job_detail(analysis_id)
+        record = self._get_valid_record(analysis_id)
         if (
             status is JobReviewStatus.READY_TO_APPLY
-            and not detail.summary.can_mark_ready_to_apply
+            and not _can_mark_ready_to_apply(record)
         ):
             raise WorkspaceError(REVIEW_STATUS_INELIGIBLE)
         self._store_call(
             lambda: self._store.save_job_review(
-                JobReviewRecord(analysis_id=analysis_id, status=status)
+                JobReviewRecord(
+                    analysis_id=analysis_id,
+                    status=status,
+                    decision_revision=(
+                        record.decision_revision
+                        if status is JobReviewStatus.READY_TO_APPLY
+                        else None
+                    ),
+                )
             )
         )
         return self.get_job_detail(analysis_id)
+
+    def _get_valid_record(self, analysis_id: str) -> AnalysisRecord:
+        records = self._store_call(self._store.list_analyses)
+        record = next((item for item in records if item.id == analysis_id), None)
+        if record is None:
+            raise WorkspaceError(ANALYSIS_NOT_FOUND)
+        if not self._is_valid(record):
+            raise WorkspaceError(ANALYSIS_UNAVAILABLE)
+        return record
 
     def get_claim_preview(self, preview_id: str) -> ClaimPreviewView:
         return self._profile_application.get_claim_preview(preview_id)
@@ -227,6 +242,19 @@ def _can_mark_ready_to_apply(record: AnalysisRecord) -> bool:
             for gap in result.gaps
         )
     )
+
+
+def _effective_review_status(
+    record: AnalysisRecord, review: JobReviewRecord | None
+) -> JobReviewStatus:
+    if review is None:
+        return JobReviewStatus.UNREVIEWED
+    if (
+        review.status is JobReviewStatus.READY_TO_APPLY
+        and review.decision_revision != record.decision_revision
+    ):
+        return JobReviewStatus.UNREVIEWED
+    return review.status
 
 
 def _text_fact(record: AnalysisRecord, *fact_ids: str) -> str | None:

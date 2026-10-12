@@ -400,6 +400,7 @@ class DecisionSurfaceManifest(DomainModel):
 
 class AnalysisRecord(DomainModel):
     id: str = Field(min_length=1)
+    decision_revision: int = Field(default=1, ge=1)
     source_analysis_id: str | None = None
     input_hash: str = Field(min_length=1)
     input_length: int | None = Field(default=None, ge=0)
@@ -418,6 +419,7 @@ class AnalysisRecord(DomainModel):
 class JobReviewRecord(DomainModel):
     analysis_id: str = Field(min_length=1)
     status: JobReviewStatus
+    decision_revision: int | None = Field(default=None, ge=1)
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     @field_validator("updated_at")

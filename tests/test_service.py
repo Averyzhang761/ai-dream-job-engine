@@ -208,6 +208,26 @@ def test_analyze_job_runs_extract_signals_decide_and_persist(tmp_path) -> None:
     assert service.list_analyzed_jobs()[0].job_title == "Senior Python Engineer"
 
 
+def test_list_analyzed_jobs_excludes_trace_integrity_invalid_success(tmp_path) -> None:
+    service, store, _, _ = _service(
+        tmp_path,
+        profile=CandidateProfile(),
+        rubric=_rubric(),
+    )
+    record = service.analyze_job(JOB_DESCRIPTION)
+    store.save_analysis(
+        record.model_copy(
+            update={
+                "trace": record.trace.model_copy(
+                    update={"analysis_id": OTHER_ID}
+                )
+            }
+        )
+    )
+
+    assert service.list_analyzed_jobs() == []
+
+
 def test_recompute_reuses_normalized_inputs_without_model_calls(tmp_path) -> None:
     ids = iter([ANALYSIS_ID, UNUSED_ID])
     service, store, extractor, signal_provider = _service(
@@ -231,6 +251,8 @@ def test_recompute_reuses_normalized_inputs_without_model_calls(tmp_path) -> Non
     assert len(extractor.calls) == 1
     assert len(signal_provider.calls) == 1
     assert recomputed.id == original.id
+    assert original.decision_revision == 1
+    assert recomputed.decision_revision == 2
     assert recomputed.created_at == original.created_at
     assert recomputed.facts == original.facts
     assert recomputed.signals == original.signals

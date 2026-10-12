@@ -79,6 +79,7 @@ def _analysis(
     created_at: datetime = NOW,
     recommendation: RecommendationLevel = RecommendationLevel.PRIORITY_APPLY,
     gaps: list[Gap] | None = None,
+    decision_revision: int = 1,
 ) -> AnalysisRecord:
     gaps = gaps or []
     fact_ids = ["company", "job_title", "requirement"]
@@ -128,6 +129,7 @@ def _analysis(
     )
     return AnalysisRecord(
         id=analysis_id,
+        decision_revision=decision_revision,
         input_hash=f"sha256:{JOB_DIGEST}",
         input_length=len(JOB_TEXT),
         facts=facts,
@@ -275,6 +277,43 @@ def test_ready_to_apply_rejects_unresolved_evidence_gap(tmp_path) -> None:
         )
 
     assert store.list_job_reviews() == []
+
+
+def test_ready_to_apply_requires_new_action_after_each_decision_revision(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    store.insert_analysis(_analysis(decision_revision=1))
+    workspace = _workspace(store)
+
+    ready = workspace.set_review_status(
+        ANALYSIS_ID, JobReviewStatus.READY_TO_APPLY
+    )
+    assert ready.summary.review_status is JobReviewStatus.READY_TO_APPLY
+    assert store.load_job_review(ANALYSIS_ID).decision_revision == 1
+
+    store.save_analysis(
+        _analysis(
+            decision_revision=2,
+            recommendation=RecommendationLevel.APPLY_AFTER_REVIEW,
+        )
+    )
+    assert (
+        workspace.get_job_detail(ANALYSIS_ID).summary.review_status
+        is JobReviewStatus.UNREVIEWED
+    )
+
+    store.save_analysis(_analysis(decision_revision=3))
+    assert (
+        workspace.get_job_detail(ANALYSIS_ID).summary.review_status
+        is JobReviewStatus.UNREVIEWED
+    )
+
+    ready_again = workspace.set_review_status(
+        ANALYSIS_ID, JobReviewStatus.READY_TO_APPLY
+    )
+    assert ready_again.summary.review_status is JobReviewStatus.READY_TO_APPLY
+    assert store.load_job_review(ANALYSIS_ID).decision_revision == 3
 
 
 def test_keep_and_ignore_are_always_explicit_user_actions(tmp_path) -> None:
