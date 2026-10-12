@@ -427,7 +427,7 @@ async def test_server_construction_and_listing_do_not_read_application_config(
 
     tools = await build_server().list_tools()
 
-    assert len(tools) == 17
+    assert len(tools) == 19
 
 
 @pytest.mark.asyncio

@@ -17,6 +17,15 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel, Field
 
 from ai_dream_job_engine.database import LocalStore
+from ai_dream_job_engine.mcp_app import (
+    MCP_APP_MIME_TYPE,
+    UI_RESOURCE_META,
+    WORKSPACE_RESOURCE_URI,
+    WorkspaceAppPayload,
+    load_workspace_html,
+    open_claim_review as build_claim_review_payload,
+    open_job_workspace as build_job_workspace_payload,
+)
 from ai_dream_job_engine.models import (
     AnalysisRecord,
     AnalysisSummary,
@@ -799,6 +808,37 @@ def build_server(services: MCPServices | None = None) -> MCPServer:
         version="0.1.0",
         log_level="ERROR",
     )
+
+    @server.resource(
+        WORKSPACE_RESOURCE_URI,
+        name="AI Dream Job Workspace",
+        description="Self-contained local job decision workspace.",
+        mime_type=MCP_APP_MIME_TYPE,
+        meta=UI_RESOURCE_META,
+    )
+    def workspace_resource() -> str:
+        return load_workspace_html()
+
+    @server.tool(
+        meta={
+            "ui": {"resourceUri": WORKSPACE_RESOURCE_URI},
+            "openai/ui": {"entrypoints": [{"type": "thread"}]},
+        }
+    )
+    def open_job_workspace() -> WorkspaceAppPayload:
+        """Open the local workspace with server-owned initial job data."""
+        return _call_safely(
+            lambda: build_job_workspace_payload(applications.workspace)
+        )
+
+    @server.tool(meta={"ui": {"resourceUri": WORKSPACE_RESOURCE_URI}})
+    def open_claim_review(preview_id: NonEmptyString) -> WorkspaceAppPayload:
+        """Open one immutable server-issued claim preview in the workspace."""
+        return _call_safely(
+            lambda: build_claim_review_payload(
+                applications.workspace, preview_id
+            )
+        )
 
     @server.tool()
     def initialize_profile(

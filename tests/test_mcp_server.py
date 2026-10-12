@@ -38,6 +38,8 @@ EXPECTED_TOOLS = {
     "set_job_review_status",
     "get_candidate_profile",
     "get_claim_preview",
+    "open_job_workspace",
+    "open_claim_review",
 }
 
 

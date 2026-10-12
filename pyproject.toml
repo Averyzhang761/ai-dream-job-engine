@@ -30,4 +30,4 @@ testpaths = ["tests"]
 where = ["src"]
 
 [tool.setuptools.package-data]
-ai_dream_job_engine = ["templates/*.json"]
+ai_dream_job_engine = ["templates/*.json", "ui/*.html"]
