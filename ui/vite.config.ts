@@ -30,21 +30,27 @@ function selfContainedDocument(): Plugin {
           const reference = new RegExp(
             `<script[^>]+src=["'][^"']*${escapeRegExp(fileName)}["'][^>]*><\\/script>`,
           );
-          html = html.replace(reference, `<script type="module">${entry.code}</script>`);
+          html = html.replace(
+            reference,
+            () => `<script type="module">${entry.code}</script>`,
+          );
           delete bundle[fileName];
         } else if (entry.type === "asset" && fileName.endsWith(".css")) {
           const reference = new RegExp(
             `<link[^>]+href=["'][^"']*${escapeRegExp(fileName)}["'][^>]*>`,
           );
-          html = html.replace(reference, `<style>${String(entry.source)}</style>`);
+          html = html.replace(
+            reference,
+            () => `<style>${String(entry.source)}</style>`,
+          );
           delete bundle[fileName];
         }
       }
 
       htmlEntry.fileName = "workspace-v1.html";
       htmlEntry.source = html
-        .replaceAll("https:", "ht\\x74ps:")
-        .replaceAll("http:", "ht\\x74p:");
+        .replaceAll("https:", "ht\\u0074ps:")
+        .replaceAll("http:", "ht\\u0074p:");
     },
     async writeBundle() {
       await mkdir(dirname(packagedDocument), { recursive: true });

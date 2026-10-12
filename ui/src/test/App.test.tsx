@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -47,6 +47,19 @@ describe("App shell", () => {
     );
   });
 
+  it("keeps every tab related to a present panel and hides inactive panels", () => {
+    render(<App bridge={connectedBridge()} />);
+
+    for (const tab of screen.getAllByRole("tab")) {
+      const panelId = tab.getAttribute("aria-controls");
+      expect(panelId).toBeTruthy();
+      expect(document.getElementById(panelId!)).not.toBeNull();
+    }
+    expect(screen.getByRole("tabpanel", { name: "岗位" })).toBeVisible();
+    expect(document.getElementById("panel-standards")).toHaveAttribute("hidden");
+    expect(document.getElementById("panel-evidence")).toHaveAttribute("hidden");
+  });
+
   it("marks a 360px viewport as a stable narrow panel", () => {
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 360 });
     render(<App bridge={connectedBridge()} />);
@@ -62,10 +75,9 @@ describe("App shell", () => {
 
     render(<App bridge={bridge} />);
 
+    const activePanel = await screen.findByRole("tabpanel");
     expect(
-      await screen.findByText("UI unavailable; use the conversation tools", {
-        selector: "strong",
-      }),
+      within(activePanel).getByText("UI unavailable; use the conversation tools"),
     ).toBeVisible();
     expect(screen.queryByText("host detail must not be shown")).not.toBeInTheDocument();
   });

@@ -133,18 +133,22 @@ export function App({ bridge: providedBridge }: AppProps) {
         ))}
       </nav>
 
-      <section
-        id={`panel-${activeView}`}
-        className="view-panel"
-        role="tabpanel"
-        aria-labelledby={`tab-${activeView}`}
-      >
-        <ViewContent
-          activeView={activeView}
-          connection={connection}
-          payload={payload}
-        />
-      </section>
+      {tabs.map(({ id }) => (
+        <section
+          key={id}
+          id={`panel-${id}`}
+          className="view-panel"
+          role="tabpanel"
+          aria-labelledby={`tab-${id}`}
+          hidden={activeView !== id}
+        >
+          <ViewContent
+            activeView={id}
+            connection={connection}
+            payload={payload}
+          />
+        </section>
+      ))}
 
       <p className="sr-only" role="status" aria-live="polite">
         {connection === "unavailable"
