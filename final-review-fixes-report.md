@@ -4,6 +4,7 @@
 
 - `1634d4e634f8a89408c9ac2d42aad479c77a9331` - `fix: harden private workspace state`
 - `2658db2a0320747529d28517b6169dc920e4fec5` - `fix: close final privacy replay gaps`
+- `f8c7990d3477db3c6425595b211be36a46cca31e` - `fix: bind memory previews to connection generation`
 
 ## Fixed
 
@@ -15,11 +16,12 @@
 6. Resume and Agent Memory preview tools remain available for Agent orchestration, but model-visible results contain only status, preview ID, and candidate count. Candidate values are available only to the App through `_meta.aiDreamJobEngine.payload`.
 7. Disconnecting Agent Memory invalidates every outstanding preview for that source. Confirmation rechecks persisted authorization during each CAS attempt, so a disconnect committed by another application instance wins over an overlapping confirmation and cannot silently reconnect the source.
 8. A full-JD evidence reference that cannot be resolved locally is rendered as `完整 JD 原文未持久化，请重新打开来源核对`; the local App never receives the opaque hash as display text.
+9. Each Agent Memory source connection persists a monotonically advancing generation. Preview issuance records the exact generation, disconnect revokes it, and every reconnect creates a new generation even for identical scope. Confirmation validates connected state, scope, and generation inside the profile CAS operation, preventing stale preview replay across application instances. Legacy profiles without the field load at generation zero and advance on the next lifecycle.
 
 ## Verification
 
-- Focused disconnect/concurrency regression: `32 passed`
-- Full Python suite: `348 passed in 3.37s`
+- Focused profile/database/MCP regression: `95 passed in 1.00s`
+- Full Python suite: `351 passed in 3.57s`
 - UI typecheck and tests: `5 files passed`, `32 tests passed`
 - Production UI build: successful, self-contained `workspace-v1.html`
 - `git diff --check`: passed
