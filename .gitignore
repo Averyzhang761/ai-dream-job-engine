@@ -10,6 +10,8 @@ venv/
 *.egg-info/
 dist/
 build/
+node_modules/
+ui/dist/
 .env*
 !.env.example
 !.env.sample
