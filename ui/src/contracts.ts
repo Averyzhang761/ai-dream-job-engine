@@ -73,6 +73,14 @@ export type CandidateComparison =
   | "required_subset"
   | "candidate_at_least";
 
+export type CriterionCategory =
+  | "role_content"
+  | "work_conditions"
+  | "growth_team"
+  | "compensation_constraints";
+export type RequirementLevel = "ignored" | "normal" | "strong" | "required";
+export type CriterionOrigin = "template" | "custom";
+
 export interface FactDefinition {
   id: string;
   name: string;
@@ -89,7 +97,12 @@ export interface FactDefinition {
 
 export interface ValueDimension {
   id: string;
+  topic_id: string;
+  category: CriterionCategory;
   name: string;
+  desired_value: string;
+  requirement_level: RequirementLevel;
+  origin: CriterionOrigin;
   definition: string;
   examples: string[];
   fact_ids: string[];
@@ -101,6 +114,29 @@ export interface ValueDimension {
   hard_constraint: boolean;
   threshold: number | null;
   explanation_template: string | null;
+}
+
+export type PreferenceConflictKind =
+  | "none"
+  | "duplicate"
+  | "direct_conflict"
+  | "semantic_tension"
+  | "manual_review";
+
+export interface PendingPreference {
+  id: string;
+  statement: string;
+  topic_id: string | null;
+  category: CriterionCategory | null;
+  name: string | null;
+  desired_value: string | null;
+  requirement_level: RequirementLevel | null;
+  evidence_guidance: string | null;
+  fact_ids: string[];
+  signal_ids: string[];
+  related_topic_ids: string[];
+  conflict_kind: PreferenceConflictKind;
+  conflicting_dimension_id: string | null;
 }
 
 export interface DecisionQuestion {
@@ -116,6 +152,7 @@ export interface Rubric {
   facts: FactDefinition[];
   dimensions: ValueDimension[];
   questions: DecisionQuestion[];
+  pending_preferences: PendingPreference[];
   recommendation_thresholds: Record<RecommendationLevel, number>;
 }
 

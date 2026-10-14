@@ -43,6 +43,149 @@ body {
   background: var(--color-white);
 }
 
+.criteria-view,
+.criteria-overview,
+.criteria-workspace {
+  min-width: 0;
+  overflow-x: hidden;
+}
+
+.criteria-heading,
+.criteria-editor-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-5);
+}
+
+.criteria-heading h2,
+.criteria-editor-header h2 {
+  margin: 0;
+  font-size: 20px;
+  letter-spacing: 0;
+}
+
+.criteria-heading p,
+.criteria-editor-header p {
+  margin: 5px 0 0;
+  color: var(--color-muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.pending-link {
+  width: 100%;
+  margin-bottom: var(--space-3);
+  padding: var(--space-2) 0;
+  border: 0;
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-warning);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.criteria-category-list {
+  border-top: 1px solid var(--color-border);
+}
+
+.criteria-category {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-4) 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.criteria-category-copy {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.criteria-category h3,
+.criteria-category p,
+.criteria-category strong {
+  margin: 0;
+  letter-spacing: 0;
+}
+
+.criteria-category h3 { font-size: 15px; }
+.criteria-category p { color: var(--color-muted); font-size: 12px; line-height: 1.4; }
+.criteria-category strong { overflow: hidden; font-size: 13px; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
+
+.criteria-view-all {
+  margin-top: var(--space-3);
+}
+
+.criteria-editor-header {
+  justify-content: flex-start;
+  align-items: center;
+}
+
+.criteria-filters {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) repeat(3, minmax(112px, auto));
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.criteria-filters select,
+.criteria-search {
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  border: 1px solid var(--color-border);
+  border-radius: 5px;
+  background: var(--color-white);
+}
+
+.criteria-filters select { padding: 6px 28px 6px 9px; }
+.criteria-search { display: flex; align-items: center; gap: 7px; padding: 0 9px; }
+.criteria-search input { width: 100%; min-width: 0; border: 0; outline: 0; }
+
+.criteria-list { border-top: 1px solid var(--color-border); }
+.criteria-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) minmax(190px, 1.5fr) minmax(132px, .65fr);
+  gap: var(--space-3);
+  align-items: center;
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.criteria-row--header {
+  color: var(--color-muted);
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: uppercase;
+}
+
+.criterion-name { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.criterion-name strong { font-size: 13px; letter-spacing: 0; }
+.origin-badge { padding: 2px 5px; border: 1px solid var(--color-border-strong); border-radius: 4px; color: var(--color-muted); font-size: 10px; }
+.criterion-choice { min-width: 0; overflow-wrap: anywhere; color: var(--color-muted); font-size: 13px; line-height: 1.4; }
+.criterion-requirement select { width: 100%; min-height: 34px; border: 1px solid var(--color-border); border-radius: 5px; background: var(--color-white); }
+.criterion-judgment { grid-column: 1 / -1; color: var(--color-muted); font-size: 12px; }
+.criterion-judgment summary { width: fit-content; cursor: pointer; color: var(--color-focus); }
+.criterion-judgment div { padding: var(--space-2) 0 0; }
+.criterion-judgment p { margin: 3px 0; line-height: 1.45; }
+.criteria-actions { display: flex; justify-content: flex-end; margin-top: var(--space-4); }
+
+@media (max-width: 560px) {
+  .criteria-heading { align-items: stretch; flex-direction: column; }
+  .criteria-heading .primary-button { width: 100%; }
+  .criteria-category { grid-template-columns: minmax(0, 1fr); }
+  .criteria-category .secondary-button { width: 100%; }
+  .criteria-filters { grid-template-columns: minmax(0, 1fr); }
+  .criteria-row { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .criteria-row--header { display: none; }
+  .criterion-choice::before { content: "我的选择  "; color: var(--color-graphite); font-weight: 650; }
+  .criterion-requirement::before { content: "要求程度"; display: block; margin-bottom: 4px; color: var(--color-graphite); font-size: 11px; font-weight: 650; }
+}
+
 button,
 input,
 select,

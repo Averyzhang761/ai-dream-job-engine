@@ -34,7 +34,12 @@ const editableRubric: Rubric = {
   }],
   dimensions: [{
     id: "location_fit",
+    topic_id: "location_fit",
+    category: "work_conditions",
     name: "地点匹配",
+    desired_value: "符合已确认的地点偏好",
+    requirement_level: "normal",
+    origin: "template",
     definition: "地点是否合适",
     examples: [],
     fact_ids: ["location"],
@@ -48,6 +53,7 @@ const editableRubric: Rubric = {
     explanation_template: null,
   }],
   questions: [],
+  pending_preferences: [],
   recommendation_thresholds: { priority_apply: 0.8, apply_after_review: 0.6, hold: 0.3, skip: 0 },
 };
 
@@ -416,20 +422,17 @@ describe("job workspace", () => {
     render(<App bridge={testBridge} />);
     await screen.findByRole("heading", { name: "First stale job" });
 
-    await user.click(screen.getByRole("tab", { name: "我的标准" }));
-    await user.click(await screen.findByRole("tab", { name: /判断字段/ }));
-    await user.click(screen.getByRole("button", { name: "编辑 地点" }));
-    const factName = screen.getByLabelText("事实名称 location");
-    await user.clear(factName);
-    await user.type(factName, "目标地点");
-    await user.click(screen.getByRole("button", { name: "保存标准" }));
+    await user.click(screen.getByRole("tab", { name: "筛选标准" }));
+    await user.click(await screen.findByRole("button", { name: "编辑 工作方式" }));
+    await user.selectOptions(screen.getByLabelText("要求程度 地点匹配"), "strong");
+    await user.click(screen.getByRole("button", { name: "保存更改" }));
     expect(await screen.findByText(/2 个岗位需要重新计算/)).toBeVisible();
 
     await user.click(screen.getByRole("tab", { name: "岗位" }));
     expect(await screen.findByText("证据或标准已更改：2 个岗位需要重新计算")).toBeVisible();
     expect(screen.getByText("此岗位结果基于旧标准，请先重新计算。" )).toBeVisible();
 
-    await user.click(screen.getByRole("tab", { name: "我的标准" }));
+    await user.click(screen.getByRole("tab", { name: "筛选标准" }));
     await user.click(await screen.findByRole("button", { name: "重新计算当前岗位" }));
     expect(await screen.findByText(/1 个岗位需要重新计算/)).toBeVisible();
 

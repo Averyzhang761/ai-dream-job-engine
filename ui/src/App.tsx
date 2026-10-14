@@ -29,7 +29,7 @@ type ConnectionState = "connecting" | "ready" | "unavailable";
 
 const tabs = [
   { id: "jobs" as const, label: "岗位", icon: BriefcaseBusiness },
-  { id: "standards" as const, label: "我的标准", icon: SlidersHorizontal },
+  { id: "standards" as const, label: "筛选标准", icon: SlidersHorizontal },
   { id: "evidence" as const, label: "我的证据", icon: ClipboardCheck },
 ];
 

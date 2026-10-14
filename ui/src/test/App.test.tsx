@@ -29,7 +29,7 @@ describe("App shell", () => {
       "aria-selected",
       "true",
     );
-    expect(screen.getByRole("tab", { name: "我的标准" })).toBeVisible();
+    expect(screen.getByRole("tab", { name: "筛选标准" })).toBeVisible();
     expect(screen.getByRole("tab", { name: "我的证据" })).toBeVisible();
   });
 
@@ -41,7 +41,7 @@ describe("App shell", () => {
     jobs.focus();
     await user.keyboard("{ArrowRight}");
 
-    expect(screen.getByRole("tab", { name: "我的标准" })).toHaveAttribute(
+    expect(screen.getByRole("tab", { name: "筛选标准" })).toHaveAttribute(
       "aria-selected",
       "true",
     );
