@@ -3,9 +3,11 @@ import { useEffect, useState } from "react";
 
 import type { McpAppBridge } from "../bridge";
 import { dimensionPatchForRequirement } from "../criteria";
-import type { CriterionCategory, RequirementLevel, Rubric, RubricPatch, ValueDimension } from "../contracts";
+import { privatePayload, type CriterionCategory, type CustomPreferenceProposal, type PreferenceResolution, type RequirementLevel, type Rubric, type RubricPatch, type ValueDimension } from "../contracts";
 import { CriteriaEditor, type CriteriaEditorMode } from "./CriteriaEditor";
 import { CriteriaOverview } from "./CriteriaOverview";
+import { CustomPreferenceDialog } from "./CustomPreferenceDialog";
+import { PendingPreferenceReview } from "./PendingPreferenceReview";
 
 interface RubricViewProps {
   bridge: McpAppBridge;
@@ -52,6 +54,8 @@ export function RubricView({
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
+  const [showPreferenceDialog, setShowPreferenceDialog] = useState(false);
+  const [reviewPreferenceId, setReviewPreferenceId] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -63,6 +67,16 @@ export function RubricView({
     }).catch(() => active && setError("无法载入筛选标准，请重试"));
     return () => { active = false; };
   }, [bridge]);
+
+  useEffect(() => bridge.subscribeToToolResults((result) => {
+    const payload = privatePayload(result);
+    if (!isRubric(payload) || payload.pending_preferences.length === 0) return;
+    const next = localize(payload);
+    setBaseline(next);
+    setDraft(structuredClone(next));
+    setShowPreferenceDialog(false);
+    setReviewPreferenceId(next.pending_preferences.at(-1)?.id ?? null);
+  }), [bridge]);
 
   if (!draft || !baseline) {
     return <div className={`state-message${error ? " state-message--error" : ""}`}>{error || "正在载入筛选标准…"}</div>;
@@ -119,6 +133,50 @@ export function RubricView({
   };
 
   const openCategory = (category: CriterionCategory) => setMode({ kind: "category", category });
+  const handoffPreference = async (statement: string) => {
+    const topicMetadata = draft.dimensions.map((item) => ({ topic_id: item.topic_id, category: item.category, name: item.name, desired_value: item.desired_value }));
+    await bridge.sendMessage([
+      "请只整理下面的用户偏好，并调用 stage_custom_preference。",
+      "不要推断候选人事实，不要读取 Agent memory，不要让偏好直接生效。",
+      `用户原文：${statement}`,
+      `当前主题元数据：${JSON.stringify(topicMetadata)}`,
+    ].join("\n"));
+  };
+
+  const stageManually = async (proposal: CustomPreferenceProposal) => {
+    const reference = draft.dimensions.find((item) => item.category === proposal.category);
+    const enriched = { ...proposal, fact_ids: reference?.fact_ids ?? [], signal_ids: reference?.signal_ids ?? [] };
+    setBusy(true);
+    try {
+      const updated = localize(await bridge.callTool<Rubric>("stage_custom_preference", { proposal: enriched }));
+      setBaseline(updated);
+      setDraft(structuredClone(updated));
+      setShowPreferenceDialog(false);
+      setReviewPreferenceId(updated.pending_preferences.at(-1)?.id ?? null);
+    } catch {
+      setError("偏好未暂存，请检查后重试");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const resolvePending = async (resolution: PreferenceResolution) => {
+    if (!reviewPreferenceId) return;
+    setBusy(true);
+    try {
+      const updated = localize(await bridge.callTool<Rubric>("resolve_custom_preference", { draft_id: reviewPreferenceId, resolution }));
+      setBaseline(updated);
+      setDraft(structuredClone(updated));
+      setReviewPreferenceId(updated.pending_preferences[0]?.id ?? null);
+      setStatus("偏好已按你的选择处理");
+    } catch {
+      setError("偏好未处理，请重试");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const reviewPreference = draft.pending_preferences.find((item) => item.id === reviewPreferenceId) ?? null;
 
   return <div className="criteria-view" aria-label="筛选标准工作区">
     {mode === "overview" ? (
@@ -127,7 +185,8 @@ export function RubricView({
         pendingCount={draft.pending_preferences.length}
         onEditCategory={openCategory}
         onViewAll={() => setMode({ kind: "all" })}
-        onAddPreference={() => setStatus("自定义偏好编辑器即将打开")}
+        onAddPreference={() => setShowPreferenceDialog(true)}
+        onReviewPending={() => setReviewPreferenceId(draft.pending_preferences[0]?.id ?? null)}
       />
     ) : (
       <>
@@ -138,5 +197,11 @@ export function RubricView({
     {error && <p className="form-message form-message--error" role="alert">{error}</p>}
     {status && <p className="form-message" role="status">{status}</p>}
     {staleJobCount > 0 && <div className="recompute-bar"><span>{staleJobCount} 个岗位需要重新计算。</span><button type="button" disabled={!selectedAnalysisId || !selectedJobIsStale || busy} onClick={recompute}><RotateCcw size={14} aria-hidden="true" />重新计算当前岗位</button></div>}
+    {showPreferenceDialog && <CustomPreferenceDialog onClose={() => setShowPreferenceDialog(false)} onAgentHandoff={handoffPreference} onManualStage={stageManually} />}
+    {reviewPreference && <div className="preference-modal" role="dialog" aria-modal="true"><div className="preference-dialog"><PendingPreferenceReview preference={reviewPreference} busy={busy} onResolve={resolvePending} /></div></div>}
   </div>;
+}
+
+function isRubric(value: unknown): value is Rubric {
+  return Boolean(value && typeof value === "object" && Array.isArray((value as Rubric).dimensions) && Array.isArray((value as Rubric).pending_preferences));
 }

@@ -139,6 +139,16 @@ export interface PendingPreference {
   conflicting_dimension_id: string | null;
 }
 
+export type CustomPreferenceProposal = Omit<
+  PendingPreference,
+  "id" | "conflict_kind" | "conflicting_dimension_id"
+>;
+
+export interface PreferenceResolution {
+  action: "accept_new" | "replace_existing" | "keep_existing" | "accept_tension";
+  edited_proposal?: CustomPreferenceProposal;
+}
+
 export interface DecisionQuestion {
   id: string;
   version: string;

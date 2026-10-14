@@ -9,9 +9,10 @@ interface CriteriaOverviewProps {
   onEditCategory: (category: CriterionCategory) => void;
   onViewAll: () => void;
   onAddPreference: () => void;
+  onReviewPending: () => void;
 }
 
-export function CriteriaOverview({ dimensions, pendingCount, onEditCategory, onViewAll, onAddPreference }: CriteriaOverviewProps) {
+export function CriteriaOverview({ dimensions, pendingCount, onEditCategory, onViewAll, onAddPreference, onReviewPending }: CriteriaOverviewProps) {
   return (
     <section className="criteria-overview" aria-label="求职画像概览">
       <header className="criteria-heading">
@@ -24,7 +25,7 @@ export function CriteriaOverview({ dimensions, pendingCount, onEditCategory, onV
         </button>
       </header>
 
-      {pendingCount > 0 && <button className="pending-link" type="button" onClick={onViewAll}>{pendingCount} 项需要处理</button>}
+      {pendingCount > 0 && <button className="pending-link" type="button" onClick={onReviewPending}>{pendingCount} 项需要处理</button>}
 
       <div className="criteria-category-list">
         {CRITERION_CATEGORIES.map((category) => {

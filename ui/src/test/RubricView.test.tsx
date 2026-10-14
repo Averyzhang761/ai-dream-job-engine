@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { McpAppBridge } from "../bridge";
 import { RubricView } from "../components/RubricView";
-import type { CriterionCategory, Rubric, ValueDimension } from "../contracts";
+import type { CriterionCategory, Rubric, ToolResultEnvelope, ValueDimension } from "../contracts";
 
 const categories: CriterionCategory[] = ["role_content", "work_conditions", "growth_team", "compensation_constraints"];
 const dimension = (index: number): ValueDimension => ({
@@ -94,5 +94,37 @@ describe("RubricView", () => {
     expect(within(workspace).getByLabelText("按要求程度筛选")).toBeVisible();
     expect(workspace).toHaveClass("criteria-workspace");
     expect(workspace).not.toHaveStyle({ overflowX: "auto" });
+  });
+
+  it("hands off explicit text and opens the private staged result for confirmation", async () => {
+    const user = userEvent.setup();
+    const sent: string[] = [];
+    const listeners: Array<(result: ToolResultEnvelope) => void> = [];
+    const staged = structuredClone(rubric);
+    staged.pending_preferences = [{
+      id: "draft-1", statement: "希望和客户共创", topic_id: "customer_contact",
+      category: "role_content", name: "客户共创", desired_value: "直接与客户共创",
+      requirement_level: "strong", evidence_guidance: "查看客户共创证据", fact_ids: ["role"],
+      signal_ids: [], related_topic_ids: [], conflict_kind: "none", conflicting_dimension_id: null,
+    }];
+    const testBridge: McpAppBridge = {
+      initialize: async () => undefined,
+      callTool: async <T,>(name: string) => {
+        if (name === "get_rubric") return structuredClone(rubric) as T;
+        throw new Error("unexpected tool");
+      },
+      sendMessage: async (message) => { sent.push(message); },
+      subscribeToToolResults: (next) => { listeners.push(next); return () => undefined; },
+    };
+    render(<RubricView bridge={testBridge} selectedAnalysisId={null} onRecomputed={vi.fn()} />);
+    await user.click(await screen.findByRole("button", { name: "添加偏好" }));
+    await user.type(screen.getByLabelText("用一句话描述偏好"), "希望和客户共创");
+    await user.click(screen.getByRole("button", { name: "整理偏好" }));
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain("希望和客户共创");
+    expect(sent[0]).toContain("不要读取 Agent memory");
+    listeners[0]?.({ _meta: { aiDreamJobEngine: { payload: staged } } });
+    expect(await screen.findByRole("region", { name: "确认自定义偏好" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "确认添加" })).toBeVisible();
   });
 });
