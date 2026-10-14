@@ -35,14 +35,17 @@ from ai_dream_job_engine.models import (
     CandidateProfile,
     ClaimPreviewView,
     ClaimDecision,
+    CustomPreferenceProposal,
     DecisionTrace,
     JobReviewStatus,
     MemoryImportPreview,
+    PreferenceResolution,
     Rubric,
     RubricPatch,
     WorkspaceJobDetail,
     WorkspaceSnapshot,
 )
+from ai_dream_job_engine.preferences import resolve_preference, stage_preference
 from ai_dream_job_engine.profile import (
     confirm_claims,
     disconnect_memory_source,
@@ -100,6 +103,10 @@ INVALID_CLAIM_DECISIONS = (
 INVALID_RUBRIC_PATCH = (
     "invalid_rubric_patch",
     "Review the rubric patch and submit valid rubric changes.",
+)
+INVALID_CUSTOM_PREFERENCE = (
+    "invalid_custom_preference",
+    "Review the custom preference and submit a valid resolution.",
 )
 RUBRIC_UPDATE_CONFLICT = (
     "rubric_update_conflict",
@@ -223,6 +230,14 @@ class RubricApplication(Protocol):
     def get_rubric(self) -> Rubric: ...
 
     def update_rubric(self, patch: RubricPatch) -> Rubric: ...
+
+    def stage_custom_preference(
+        self, proposal: CustomPreferenceProposal
+    ) -> Rubric: ...
+
+    def resolve_custom_preference(
+        self, draft_id: str, resolution: PreferenceResolution
+    ) -> Rubric: ...
 
 
 class AnalysisApplication(Protocol):
@@ -647,6 +662,51 @@ class LocalRubricApplication:
                         return updated
                 except Exception:
                     raise ApplicationError(STORAGE_FAILURE) from None
+
+    def stage_custom_preference(
+        self, proposal: CustomPreferenceProposal
+    ) -> Rubric:
+        with self._lock:
+            return self._mutate_preference(
+                lambda rubric: stage_preference(rubric, proposal)
+            )
+
+    def resolve_custom_preference(
+        self, draft_id: str, resolution: PreferenceResolution
+    ) -> Rubric:
+        with self._lock:
+            return self._mutate_preference(
+                lambda rubric: resolve_preference(
+                    rubric, draft_id, resolution
+                )
+            )
+
+    def _mutate_preference(
+        self, operation: Callable[[Rubric], Rubric]
+    ) -> Rubric:
+        while True:
+            current = self._get_rubric()
+            try:
+                updated = operation(current).model_copy(
+                    update={"storage_revision": current.storage_revision + 1}
+                )
+            except ValueError:
+                raise ApplicationError(INVALID_CUSTOM_PREFERENCE) from None
+            try:
+                compare_and_swap = getattr(
+                    self._store, "compare_and_swap_rubric", None
+                )
+                if compare_and_swap is None:
+                    self._store.save_rubric(updated)
+                    saved = True
+                else:
+                    saved = compare_and_swap(
+                        updated, current.storage_revision
+                    )
+                if saved:
+                    return updated
+            except Exception:
+                raise ApplicationError(STORAGE_FAILURE) from None
 
     def _get_rubric(self) -> Rubric:
         try:
@@ -1103,6 +1163,30 @@ def build_server(services: MCPServices | None = None) -> MCPServer:
         """Apply a validated declarative patch to the active rubric."""
         return _private_app_result(_call_safely(
             lambda: applications.rubric.update_rubric(patch)
+        ))
+
+    @server.tool(
+        meta={"ui": {"visibility": ["model", "app"]}},
+        structured_output=False,
+    )
+    def stage_custom_preference(
+        proposal: CustomPreferenceProposal,
+    ) -> CallToolResult:
+        """Stage a structured preference for explicit user review."""
+        return _private_app_result(_call_safely(
+            lambda: applications.rubric.stage_custom_preference(proposal)
+        ))
+
+    @server.tool(meta={"ui": {"visibility": ["app"]}}, structured_output=False)
+    def resolve_custom_preference(
+        draft_id: NonEmptyString,
+        resolution: PreferenceResolution,
+    ) -> CallToolResult:
+        """Apply an explicit user resolution to a staged preference."""
+        return _private_app_result(_call_safely(
+            lambda: applications.rubric.resolve_custom_preference(
+                draft_id, resolution
+            )
         ))
 
     @server.tool()

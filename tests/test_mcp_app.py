@@ -75,6 +75,7 @@ async def test_private_ui_tools_are_app_only_and_return_payload_in_meta() -> Non
         "get_claim_preview",
         "get_rubric",
         "update_rubric",
+        "resolve_custom_preference",
         "confirm_profile_claims",
         "confirm_agent_memory_import",
         "disconnect_agent_memory",
@@ -90,9 +91,37 @@ async def test_private_ui_tools_are_app_only_and_return_payload_in_meta() -> Non
 async def test_preview_orchestration_tools_keep_private_payload_in_app_meta() -> None:
     tools = {tool.name: tool for tool in await _server().list_tools()}
 
-    for name in ("review_profile_claims", "preview_agent_memory_import"):
+    for name in (
+        "review_profile_claims",
+        "preview_agent_memory_import",
+        "stage_custom_preference",
+    ):
         assert tools[name].meta["ui"]["visibility"] == ["model", "app"]
         assert tools[name].output_schema is None
+
+
+@pytest.mark.asyncio
+async def test_staged_preference_is_returned_only_in_private_app_payload() -> None:
+    server = _server()
+
+    result = await server.call_tool(
+        "stage_custom_preference",
+        {
+            "proposal": {
+                "statement": "Private preference text",
+                "topic_id": "team_style",
+                "category": "growth_team",
+                "name": "Team style",
+                "desired_value": "Collaborative team",
+                "requirement_level": "normal",
+                "evidence_guidance": "Look for collaboration evidence",
+            }
+        },
+    )
+
+    assert result.structured_content == {"status": "ok"}
+    assert "Private preference text" not in str(result.structured_content)
+    assert result.meta["aiDreamJobEngine"]["payload"]["version"] == "rubric-v1"
 
 
 @pytest.mark.asyncio

@@ -22,7 +22,9 @@ from ai_dream_job_engine.models import (
     CandidateProfile,
     ClaimDecision,
     ClaimSource,
+    CustomPreferenceProposal,
     JobReviewStatus,
+    PreferenceResolution,
     Rubric,
     RubricPatch,
 )
@@ -608,6 +610,70 @@ def test_two_rubric_applications_reject_overlapping_concurrent_patches(
     assert loaded.storage_revision == 1
 
 
+def test_two_rubric_applications_cannot_resolve_the_same_preference_twice(
+    tmp_path,
+) -> None:
+    path = tmp_path / "shared-preference.sqlite3"
+    setup_store = LocalStore(path)
+    setup_store.initialize()
+    application = LocalRubricApplication(setup_store)
+    staged = application.stage_custom_preference(
+        CustomPreferenceProposal(
+            statement="Prefer customer discovery",
+            topic_id="customer_discovery",
+            category="role_content",
+            name="Customer discovery",
+            desired_value="Direct customer discovery",
+            requirement_level="strong",
+            evidence_guidance="Look for customer interviews",
+            fact_ids=["product_customer_scope"],
+        )
+    )
+    draft_id = staged.pending_preferences[0].id
+
+    barrier = threading.Barrier(2)
+    first = LocalRubricApplication(BarrierRubricStore(path, barrier))
+    second = LocalRubricApplication(BarrierRubricStore(path, barrier))
+    resolution = PreferenceResolution(action="accept_new")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(item.resolve_custom_preference, draft_id, resolution)
+            for item in (first, second)
+        ]
+        outcomes = []
+        for future in futures:
+            try:
+                outcomes.append(future.result(timeout=5))
+            except ApplicationError as error:
+                outcomes.append(error)
+
+    assert sum(isinstance(item, Rubric) for item in outcomes) == 1
+    errors = [item for item in outcomes if isinstance(item, ApplicationError)]
+    assert len(errors) == 1
+    assert errors[0].code == "invalid_custom_preference"
+    loaded = setup_store.load_rubric()
+    assert loaded is not None
+    assert len(
+        [item for item in loaded.dimensions if item.topic_id == "customer_discovery"]
+    ) == 1
+
+
+def test_invalid_preference_error_does_not_echo_private_text() -> None:
+    store = MemoryStore(rubric=load_default_rubric())
+    application = LocalRubricApplication(store)
+    private_text = "Do not expose this preference"
+
+    with pytest.raises(ApplicationError) as captured:
+        application.resolve_custom_preference(
+            private_text,
+            PreferenceResolution(action="accept_new"),
+        )
+
+    assert captured.value.code == "invalid_custom_preference"
+    assert private_text not in str(captured.value)
+
+
 def test_memory_confirmation_rejects_forged_and_stale_preview_ids() -> None:
     store = MemoryStore(profile=CandidateProfile())
     application = LocalProfileApplication(store)
@@ -766,7 +832,7 @@ async def test_server_construction_and_listing_do_not_read_application_config(
 
     tools = await build_server().list_tools()
 
-    assert len(tools) == 19
+    assert len(tools) == 21
 
 
 @pytest.mark.asyncio

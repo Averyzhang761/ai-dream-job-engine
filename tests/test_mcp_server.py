@@ -29,6 +29,8 @@ EXPECTED_TOOLS = {
     "disconnect_agent_memory",
     "get_rubric",
     "update_rubric",
+    "stage_custom_preference",
+    "resolve_custom_preference",
     "analyze_job",
     "recompute_decision",
     "get_decision_trace",
@@ -68,6 +70,12 @@ class FakeRubricService:
         return Rubric(version="rubric-v1")
 
     def update_rubric(self, patch):
+        return Rubric(version="rubric-v1")
+
+    def stage_custom_preference(self, proposal):
+        return Rubric(version="rubric-v1")
+
+    def resolve_custom_preference(self, draft_id, resolution):
         return Rubric(version="rubric-v1")
 
 
@@ -152,10 +160,16 @@ async def test_tool_schemas_use_domain_contracts() -> None:
     initialize_schema = tools["initialize_profile"].input_schema
     confirm_schema = tools["confirm_profile_claims"].input_schema
     rubric_schema = tools["update_rubric"].input_schema
+    stage_schema = tools["stage_custom_preference"].input_schema
+    resolve_schema = tools["resolve_custom_preference"].input_schema
     assert "CandidateProfile" in initialize_schema["$defs"]
     assert "ClaimDecision" in confirm_schema["$defs"]
     assert set(confirm_schema["required"]) == {"preview_id", "decisions"}
     assert "RubricPatch" in rubric_schema["$defs"]
+    assert set(stage_schema["required"]) == {"proposal"}
+    assert "CustomPreferenceProposal" in stage_schema["$defs"]
+    assert set(resolve_schema["required"]) == {"draft_id", "resolution"}
+    assert "PreferenceResolution" in resolve_schema["$defs"]
     review_schema = tools["set_job_review_status"].input_schema
     assert "JobReviewStatus" in review_schema["$defs"]
     assert set(review_schema["required"]) == {"analysis_id", "status"}
