@@ -272,6 +272,43 @@ class DecisionQuestion(DomainModel):
     question: str = Field(min_length=1)
 
 
+class PreferenceConflictKind(StrEnum):
+    NONE = "none"
+    DUPLICATE = "duplicate"
+    DIRECT_CONFLICT = "direct_conflict"
+    SEMANTIC_TENSION = "semantic_tension"
+    MANUAL_REVIEW = "manual_review"
+
+
+class CustomPreferenceProposal(DomainModel):
+    statement: str = Field(min_length=1)
+    topic_id: str | None = None
+    category: CriterionCategory | None = None
+    name: str | None = None
+    desired_value: str | None = None
+    requirement_level: RequirementLevel | None = None
+    evidence_guidance: str | None = None
+    fact_ids: list[str] = Field(default_factory=list)
+    signal_ids: list[str] = Field(default_factory=list)
+    related_topic_ids: list[str] = Field(default_factory=list)
+
+
+class PendingPreference(CustomPreferenceProposal):
+    id: str = Field(min_length=1)
+    conflict_kind: PreferenceConflictKind
+    conflicting_dimension_id: str | None = None
+
+
+class PreferenceResolution(DomainModel):
+    action: Literal[
+        "accept_new",
+        "replace_existing",
+        "keep_existing",
+        "accept_tension",
+    ]
+    edited_proposal: CustomPreferenceProposal | None = None
+
+
 class Rubric(DomainModel):
     id: str = "default"
     version: str = Field(min_length=1)
@@ -280,6 +317,7 @@ class Rubric(DomainModel):
     facts: list[FactDefinition] = Field(default_factory=list)
     dimensions: list[ValueDimension] = Field(default_factory=list)
     questions: list[DecisionQuestion] = Field(default_factory=list)
+    pending_preferences: list[PendingPreference] = Field(default_factory=list)
     recommendation_thresholds: dict[RecommendationLevel, float] = Field(
         default_factory=dict
     )

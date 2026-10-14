@@ -71,6 +71,7 @@ def apply_rubric_patch(rubric: Rubric, patch: RubricPatch) -> Rubric:
         facts=facts,
         dimensions=dimensions,
         questions=questions,
+        pending_preferences=rubric.pending_preferences,
         recommendation_thresholds=thresholds,
     )
     updated = updated.model_copy(update={"revision": rubric_revision(updated)})
