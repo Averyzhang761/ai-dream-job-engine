@@ -126,6 +126,62 @@ def test_dimension_rejects_negative_weight() -> None:
         )
 
 
+def _dimension_payload(**updates: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "id": "dimension-1",
+        "name": "Applied AI depth",
+        "definition": "How directly the role builds applied AI products.",
+        "weight": 1,
+        "scoring_direction": "higher_is_better",
+        "hard_constraint": False,
+    }
+    payload.update(updates)
+    return payload
+
+
+def test_legacy_dimension_derives_requirement_level_without_changing_weight() -> None:
+    required = ValueDimension.model_validate(
+        _dimension_payload(weight=2.5, hard_constraint=True)
+    )
+    ignored = ValueDimension.model_validate(
+        _dimension_payload(weight=0, hard_constraint=False)
+    )
+
+    assert required.requirement_level == "required"
+    assert required.weight == 2.5
+    assert ignored.requirement_level == "ignored"
+
+
+def test_explicit_requirement_level_derives_internal_projection() -> None:
+    payload = _dimension_payload(
+        topic_id="applied_ai_depth",
+        category="role_content",
+        desired_value="Build applied AI products",
+        requirement_level="strong",
+        origin="template",
+    )
+    payload.pop("weight")
+    payload.pop("hard_constraint")
+
+    dimension = ValueDimension.model_validate(payload)
+
+    assert dimension.weight == 1.5
+    assert dimension.hard_constraint is False
+
+
+def test_explicit_requirement_level_rejects_mismatched_internal_projection() -> None:
+    with pytest.raises(ValidationError, match="requirement_level"):
+        ValueDimension.model_validate(
+            _dimension_payload(
+                topic_id="applied_ai_depth",
+                category="role_content",
+                desired_value="Build applied AI products",
+                requirement_level="strong",
+                origin="template",
+            )
+        )
+
+
 def test_signal_probability_must_be_between_zero_and_one() -> None:
     with pytest.raises(ValidationError):
         DecisionSignal(

@@ -65,6 +65,25 @@ class ScoringDirection(StrEnum):
     LOWER_IS_BETTER = "lower_is_better"
 
 
+class CriterionCategory(StrEnum):
+    ROLE_CONTENT = "role_content"
+    WORK_CONDITIONS = "work_conditions"
+    GROWTH_TEAM = "growth_team"
+    COMPENSATION_CONSTRAINTS = "compensation_constraints"
+
+
+class RequirementLevel(StrEnum):
+    IGNORED = "ignored"
+    NORMAL = "normal"
+    STRONG = "strong"
+    REQUIRED = "required"
+
+
+class CriterionOrigin(StrEnum):
+    TEMPLATE = "template"
+    CUSTOM = "custom"
+
+
 class ClaimImportOrigin(DomainModel):
     source_agent: str = Field(min_length=1)
     candidate_id: str = Field(min_length=1)
@@ -185,6 +204,11 @@ class ValueDimension(DomainModel):
     id: str = Field(min_length=1)
     name: str = Field(min_length=1)
     definition: str = Field(min_length=1)
+    topic_id: str = Field(min_length=1)
+    category: CriterionCategory
+    desired_value: str = Field(min_length=1)
+    requirement_level: RequirementLevel
+    origin: CriterionOrigin
     examples: list[str] = Field(default_factory=list)
     fact_ids: list[str] = Field(default_factory=list)
     signal_ids: list[str] = Field(default_factory=list)
@@ -195,6 +219,51 @@ class ValueDimension(DomainModel):
     hard_constraint: bool = False
     threshold: float | None = None
     explanation_template: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def add_user_facing_criterion_metadata(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        payload = dict(value)
+        payload.setdefault("topic_id", payload.get("id"))
+        payload.setdefault("category", CriterionCategory.ROLE_CONTENT)
+        payload.setdefault("desired_value", payload.get("definition"))
+        payload.setdefault("origin", CriterionOrigin.TEMPLATE)
+
+        explicit_level = payload.get("requirement_level")
+        if explicit_level is None:
+            weight = payload.get("weight", 0)
+            if payload.get("hard_constraint", False):
+                payload["requirement_level"] = RequirementLevel.REQUIRED
+            elif weight == 0:
+                payload["requirement_level"] = RequirementLevel.IGNORED
+            elif isinstance(weight, (int, float)) and weight >= 1.5:
+                payload["requirement_level"] = RequirementLevel.STRONG
+            else:
+                payload["requirement_level"] = RequirementLevel.NORMAL
+            return payload
+
+        try:
+            level = RequirementLevel(explicit_level)
+        except ValueError:
+            return payload
+        projection = {
+            RequirementLevel.IGNORED: (0.0, False),
+            RequirementLevel.NORMAL: (1.0, False),
+            RequirementLevel.STRONG: (1.5, False),
+            RequirementLevel.REQUIRED: (1.0, True),
+        }[level]
+        if "weight" in payload and payload["weight"] != projection[0]:
+            raise ValueError("weight must match requirement_level")
+        if (
+            "hard_constraint" in payload
+            and payload["hard_constraint"] is not projection[1]
+        ):
+            raise ValueError("hard_constraint must match requirement_level")
+        payload.setdefault("weight", projection[0])
+        payload.setdefault("hard_constraint", projection[1])
+        return payload
 
 
 class DecisionQuestion(DomainModel):

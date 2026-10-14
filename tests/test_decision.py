@@ -17,6 +17,7 @@ from ai_dream_job_engine.models import (
     FactDefinition,
     GapKind,
     RecommendationLevel,
+    RequirementLevel,
     Rubric,
     ValueDimension,
 )
@@ -151,6 +152,60 @@ def _strong_claims() -> list[CandidateClaim]:
             ClaimSource.USER_CONFIRMED,
         ),
     ]
+
+
+def test_requirement_projection_controls_preference_contributions() -> None:
+    rubric = _rubric()
+    ignored = rubric.dimensions[0].model_copy(
+        update={
+            "requirement_level": RequirementLevel.IGNORED,
+            "weight": 0,
+            "hard_constraint": False,
+        }
+    )
+    strong = rubric.dimensions[1].model_copy(
+        update={
+            "requirement_level": RequirementLevel.STRONG,
+            "weight": 1.5,
+            "hard_constraint": False,
+        }
+    )
+    rubric = rubric.model_copy(
+        update={"dimensions": [ignored, strong, rubric.dimensions[2]]}
+    )
+
+    result = decide_job(_facts(), _signals(), CandidateProfile(claims=_strong_claims()), rubric)
+
+    contributions = {item.subject_id: item for item in result.preference_contributions}
+    assert "preference" not in contributions
+    assert contributions["python"].weight == 1.5
+
+
+def test_required_requirement_level_still_produces_hard_blocker() -> None:
+    rubric = _rubric()
+    authorization = rubric.dimensions[2].model_copy(
+        update={
+            "requirement_level": RequirementLevel.REQUIRED,
+            "weight": 1,
+            "hard_constraint": True,
+        }
+    )
+    rubric = rubric.model_copy(
+        update={"dimensions": [*rubric.dimensions[:2], authorization]}
+    )
+    claims = [
+        _strong_claims()[0],
+        _claim(
+            "claim-auth-conflict",
+            "work_authorized",
+            False,
+            ClaimSource.USER_CONFIRMED,
+        ),
+    ]
+
+    result = decide_job(_facts(), _signals(), CandidateProfile(claims=claims), rubric)
+
+    assert GapKind.HARD_BLOCKER in {gap.kind for gap in result.gaps}
 
 
 def _with_fact_type(fact: FactDefinition, data_type: str) -> FactDefinition:

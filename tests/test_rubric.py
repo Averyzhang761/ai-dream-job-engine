@@ -8,7 +8,12 @@ import pytest
 from pydantic import ValidationError
 
 from ai_dream_job_engine.models import RecommendationLevel, RubricPatch
-from ai_dream_job_engine.rubric import apply_rubric_patch, load_default_rubric
+from ai_dream_job_engine.rubric import (
+    apply_rubric_patch,
+    load_default_rubric,
+    requirement_is_hard,
+    requirement_weight,
+)
 
 
 EXPECTED_DIMENSION_IDS = {
@@ -37,6 +42,17 @@ def test_default_rubric_contains_ai_job_dimensions() -> None:
 
     assert rubric.version == "ai-job-v1"
     assert {dimension.id for dimension in rubric.dimensions} == EXPECTED_DIMENSION_IDS
+    assert all(dimension.topic_id == dimension.id for dimension in rubric.dimensions)
+    assert all(dimension.desired_value for dimension in rubric.dimensions)
+
+
+def test_requirement_levels_have_one_internal_projection() -> None:
+    assert requirement_weight("ignored") == 0
+    assert requirement_weight("normal") == 1
+    assert requirement_weight("strong") == 1.5
+    assert requirement_weight("required") == 1
+    assert requirement_is_hard("required") is True
+    assert requirement_is_hard("strong") is False
 
 
 def test_default_questions_include_product_applied_ai_and_infrastructure() -> None:
@@ -52,7 +68,14 @@ def test_default_questions_include_product_applied_ai_and_infrastructure() -> No
 def test_patch_can_change_weight_and_threshold() -> None:
     rubric = load_default_rubric()
     patch = RubricPatch(
-        dimension_updates={"applied_ai_depth": {"weight": 2.5, "threshold": 0.7}},
+        dimension_updates={
+            "applied_ai_depth": {
+                "requirement_level": "normal",
+                "weight": 1,
+                "hard_constraint": False,
+                "threshold": 0.7,
+            }
+        },
         threshold_updates={RecommendationLevel.PRIORITY_APPLY: 0.85},
     )
 
@@ -63,7 +86,8 @@ def test_patch_can_change_weight_and_threshold() -> None:
         for dimension in updated.dimensions
         if dimension.id == "applied_ai_depth"
     )
-    assert applied_ai.weight == 2.5
+    assert applied_ai.requirement_level == "normal"
+    assert applied_ai.weight == 1
     assert applied_ai.threshold == 0.7
     assert updated.recommendation_thresholds[
         RecommendationLevel.PRIORITY_APPLY
@@ -72,7 +96,7 @@ def test_patch_can_change_weight_and_threshold() -> None:
         dimension
         for dimension in rubric.dimensions
         if dimension.id == "applied_ai_depth"
-    ).weight != 2.5
+    ).requirement_level != "normal"
 
 
 def test_semantic_patch_changes_revision_and_noop_is_stable() -> None:
@@ -81,11 +105,27 @@ def test_semantic_patch_changes_revision_and_noop_is_stable() -> None:
     unchanged = apply_rubric_patch(rubric, RubricPatch())
     changed = apply_rubric_patch(
         rubric,
-        RubricPatch(dimension_updates={"applied_ai_depth": {"weight": 2.5}}),
+        RubricPatch(
+            dimension_updates={
+                "applied_ai_depth": {
+                    "requirement_level": "normal",
+                    "weight": 1,
+                    "hard_constraint": False,
+                }
+            }
+        ),
     )
     repeated = apply_rubric_patch(
         rubric,
-        RubricPatch(dimension_updates={"applied_ai_depth": {"weight": 2.5}}),
+        RubricPatch(
+            dimension_updates={
+                "applied_ai_depth": {
+                    "requirement_level": "normal",
+                    "weight": 1,
+                    "hard_constraint": False,
+                }
+            }
+        ),
     )
 
     assert rubric.revision

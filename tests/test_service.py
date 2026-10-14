@@ -519,7 +519,15 @@ def test_patch_and_recompute_record_distinct_rubric_revision(tmp_path) -> None:
     original = service.analyze_job(JOB_DESCRIPTION)
     current = apply_rubric_patch(
         store.load_rubric(),
-        RubricPatch(dimension_updates={"role_fit": {"weight": 2}}),
+        RubricPatch(
+            dimension_updates={
+                "role_fit": {
+                    "requirement_level": "strong",
+                    "weight": 1.5,
+                    "hard_constraint": False,
+                }
+            }
+        ),
     )
     store.save_rubric(current)
 

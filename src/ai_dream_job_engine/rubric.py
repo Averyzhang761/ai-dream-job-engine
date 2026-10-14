@@ -15,6 +15,7 @@ from ai_dream_job_engine.models import (
     FactDataType,
     FactDefinition,
     RecommendationLevel,
+    RequirementLevel,
     Rubric,
     RubricPatch,
     ValueDimension,
@@ -22,6 +23,19 @@ from ai_dream_job_engine.models import (
 
 
 _ModelT = TypeVar("_ModelT", bound=BaseModel)
+
+
+def requirement_weight(level: RequirementLevel | str) -> float:
+    return {
+        RequirementLevel.IGNORED: 0.0,
+        RequirementLevel.NORMAL: 1.0,
+        RequirementLevel.STRONG: 1.5,
+        RequirementLevel.REQUIRED: 1.0,
+    }[RequirementLevel(level)]
+
+
+def requirement_is_hard(level: RequirementLevel | str) -> bool:
+    return RequirementLevel(level) is RequirementLevel.REQUIRED
 
 
 def load_default_rubric() -> Rubric:
