@@ -1172,7 +1172,12 @@ def build_server(services: MCPServices | None = None) -> MCPServer:
     def stage_custom_preference(
         proposal: CustomPreferenceProposal,
     ) -> CallToolResult:
-        """Stage a structured preference for explicit user review."""
+        """Structure only the supplied preference for explicit user review.
+
+        Use the user's statement and visible criterion topic metadata to fill
+        topic, category, name, desired value, requirement level, and evidence
+        guidance. Do not infer candidate facts or inspect Agent memory.
+        """
         return _private_app_result(_call_safely(
             lambda: applications.rubric.stage_custom_preference(proposal)
         ))

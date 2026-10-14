@@ -43,7 +43,7 @@ describe("packaged MCP App", () => {
       Array.from(dom.window.document.querySelectorAll('[role="tab"]')).map(
         (tab) => tab.textContent,
       ),
-    ).toEqual(["岗位", "我的标准", "我的证据"]);
+    ).toEqual(["岗位", "筛选标准", "我的证据"]);
     dom.window.close();
   });
 });

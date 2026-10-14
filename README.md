@@ -115,6 +115,23 @@ External models receive public job-description text only by default. Selected ca
 
 Agent memory is never silently imported. The user previews proposed claims, chooses the scope, and explicitly accepts, edits, or rejects each candidate. Imported claims retain provenance and can be reviewed locally.
 
+## Filter criteria workspace
+
+The `筛选标准` view opens with four job-profile themes instead of a long
+configuration table: role content, work conditions, growth and team, and
+compensation and constraints. Open one theme to adjust only its criteria, or
+use the all-criteria view for search and filtering. Each criterion exposes one
+requirement level: ignored, normal preference, strong preference, or required.
+Internal weights, hard-block projections, keywords, thresholds, and extraction
+fields remain outside the primary UI.
+
+Custom preferences begin as natural language and are never activated directly
+by the host Agent. The Agent may structure the supplied statement only after an
+explicit user action. The local app then shows an editable preview and requires
+the user to resolve duplicates, direct conflicts, or semantic tension before
+the rule affects scoring. An Agent handoff failure preserves the original text
+and exposes the same manual confirmation fields.
+
 ## One-JD quickstart
 
 1. Create or review the local candidate profile and rubric.
