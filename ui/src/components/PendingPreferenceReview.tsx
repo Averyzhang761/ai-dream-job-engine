@@ -15,7 +15,7 @@ export function PendingPreferenceReview({ preference, busy, onResolve }: Pending
   const [proposal, setProposal] = useState<CustomPreferenceProposal>(() => editable(preference));
   useEffect(() => setProposal(editable(preference)), [preference]);
   const set = (changes: Partial<CustomPreferenceProposal>) => setProposal((current) => ({ ...current, ...changes }));
-  const complete = Boolean(proposal.topic_id?.trim() && proposal.category && proposal.name?.trim() && proposal.desired_value?.trim() && proposal.requirement_level && proposal.evidence_guidance?.trim());
+  const complete = Boolean(proposal.topic_id?.trim() && proposal.category && proposal.name?.trim() && proposal.desired_value?.trim() && proposal.requirement_level && proposal.evidence_guidance?.trim() && (proposal.positive_keywords.length || proposal.negative_keywords.length));
   const resolve = (action: PreferenceResolution["action"]) => onResolve({ action, edited_proposal: proposal });
 
   return <section className="pending-review" aria-label="确认自定义偏好">
@@ -28,6 +28,8 @@ export function PendingPreferenceReview({ preference, busy, onResolve }: Pending
       <label>我的选择<input aria-label="我的选择" value={proposal.desired_value ?? ""} onChange={(event) => set({ desired_value: event.target.value })} /></label>
       <label>要求程度<select aria-label="要求程度" value={proposal.requirement_level ?? ""} onChange={(event) => set({ requirement_level: event.target.value as RequirementLevel })}><option value="" disabled>请选择</option>{levels.map((item) => <option key={item} value={item}>{requirementLabel(item)}</option>)}</select></label>
       <label>系统如何找证据<textarea aria-label="系统如何找证据" value={proposal.evidence_guidance ?? ""} onChange={(event) => set({ evidence_guidance: event.target.value })} /></label>
+      <label>符合时常见表述<input aria-label="符合时常见表述" value={proposal.positive_keywords.join("，")} onChange={(event) => set({ positive_keywords: splitTerms(event.target.value) })} /></label>
+      <label>不符合时常见表述<input aria-label="不符合时常见表述" value={proposal.negative_keywords.join("，")} onChange={(event) => set({ negative_keywords: splitTerms(event.target.value) })} /></label>
     </div>
     <div className="pending-resolution-actions">
       {(preference.conflict_kind === "none" || preference.conflict_kind === "manual_review") && <button className="primary-button" type="button" disabled={!complete || busy} onClick={() => resolve("accept_new")}>确认添加</button>}
@@ -36,6 +38,10 @@ export function PendingPreferenceReview({ preference, busy, onResolve }: Pending
       {preference.conflict_kind === "semantic_tension" && <><button className="primary-button" type="button" disabled={!complete || busy} onClick={() => resolve("accept_tension")}>保留两项</button><button className="secondary-button" type="button" disabled={busy} onClick={() => resolve("keep_existing")}>仅保留现有标准</button></>}
     </div>
   </section>;
+}
+
+function splitTerms(value: string): string[] {
+  return value.split(/[,\uff0c]/).map((item) => item.trim()).filter(Boolean);
 }
 
 function editable(preference: PendingPreference): CustomPreferenceProposal {

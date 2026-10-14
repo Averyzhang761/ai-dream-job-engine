@@ -102,7 +102,10 @@ export function RubricView({
       setStatus("没有需要保存的更改");
       return;
     }
-    const patch: RubricPatch = { dimension_updates: dimensionUpdates };
+    const patch: RubricPatch = {
+      dimension_updates: dimensionUpdates,
+      ...(baseline.storage_revision === undefined ? {} : { expected_storage_revision: baseline.storage_revision }),
+    };
     setBusy(true);
     setError("");
     try {
@@ -138,17 +141,16 @@ export function RubricView({
     await bridge.sendMessage([
       "请只整理下面的用户偏好，并调用 stage_custom_preference。",
       "不要推断候选人事实，不要读取 Agent memory，不要让偏好直接生效。",
+      "请分别给出可在 JD 原文中本地匹配的 positive_keywords 和 negative_keywords，不要把否定词本身当作符合线索。",
       `用户原文：${statement}`,
       `当前主题元数据：${JSON.stringify(topicMetadata)}`,
     ].join("\n"));
   };
 
   const stageManually = async (proposal: CustomPreferenceProposal) => {
-    const reference = draft.dimensions.find((item) => item.category === proposal.category);
-    const enriched = { ...proposal, fact_ids: reference?.fact_ids ?? [], signal_ids: reference?.signal_ids ?? [] };
     setBusy(true);
     try {
-      const updated = localize(await bridge.callTool<Rubric>("stage_custom_preference", { proposal: enriched }));
+      const updated = localize(await bridge.callTool<Rubric>("stage_custom_preference", { proposal }));
       setBaseline(updated);
       setDraft(structuredClone(updated));
       setShowPreferenceDialog(false);
@@ -162,9 +164,13 @@ export function RubricView({
 
   const resolvePending = async (resolution: PreferenceResolution) => {
     if (!reviewPreferenceId) return;
+    const resolved = {
+      ...resolution,
+      ...(baseline.storage_revision === undefined ? {} : { expected_storage_revision: baseline.storage_revision }),
+    };
     setBusy(true);
     try {
-      const updated = localize(await bridge.callTool<Rubric>("resolve_custom_preference", { draft_id: reviewPreferenceId, resolution }));
+      const updated = localize(await bridge.callTool<Rubric>("resolve_custom_preference", { draft_id: reviewPreferenceId, resolution: resolved }));
       setBaseline(updated);
       setDraft(structuredClone(updated));
       setReviewPreferenceId(updated.pending_preferences[0]?.id ?? null);
@@ -190,7 +196,7 @@ export function RubricView({
       />
     ) : (
       <>
-        <CriteriaEditor dimensions={draft.dimensions} mode={mode} onBack={() => setMode("overview")} onRequirementChange={changeRequirement} />
+        <CriteriaEditor dimensions={draft.dimensions} pendingPreferences={draft.pending_preferences} mode={mode} onBack={() => setMode("overview")} onReviewPending={setReviewPreferenceId} onRequirementChange={changeRequirement} />
         <div className="criteria-actions"><button className="primary-button" type="button" disabled={busy} onClick={save}><Save size={15} aria-hidden="true" />保存更改</button></div>
       </>
     )}

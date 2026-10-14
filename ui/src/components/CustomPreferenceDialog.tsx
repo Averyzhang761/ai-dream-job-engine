@@ -23,6 +23,8 @@ export function CustomPreferenceDialog({ onClose, onAgentHandoff, onManualStage 
   const [desiredValue, setDesiredValue] = useState("");
   const [level, setLevel] = useState<RequirementLevel>("normal");
   const [guidance, setGuidance] = useState("");
+  const [positiveKeywords, setPositiveKeywords] = useState("");
+  const [negativeKeywords, setNegativeKeywords] = useState("");
   const [relatedTopics, setRelatedTopics] = useState("");
 
   const structure = async () => {
@@ -39,13 +41,16 @@ export function CustomPreferenceDialog({ onClose, onAgentHandoff, onManualStage 
     }
   };
 
-  const complete = Boolean(topicId.trim() && name.trim() && desiredValue.trim() && guidance.trim());
+  const complete = Boolean(topicId.trim() && name.trim() && desiredValue.trim() && guidance.trim() && (positiveKeywords.trim() || negativeKeywords.trim()));
   const submitManual = async () => {
     if (!complete) return;
     await onManualStage({
       statement: statement.trim(), topic_id: topicId.trim(), category, name: name.trim(),
       desired_value: desiredValue.trim(), requirement_level: level,
-      evidence_guidance: guidance.trim(), fact_ids: [], signal_ids: [],
+      evidence_guidance: guidance.trim(),
+      positive_keywords: splitTerms(positiveKeywords),
+      negative_keywords: splitTerms(negativeKeywords),
+      fact_ids: [], signal_ids: [],
       related_topic_ids: relatedTopics.split(/[,，]/).map((item) => item.trim()).filter(Boolean),
     });
   };
@@ -63,9 +68,15 @@ export function CustomPreferenceDialog({ onClose, onAgentHandoff, onManualStage 
         <label>我的选择<input aria-label="我的选择" value={desiredValue} onChange={(event) => setDesiredValue(event.target.value)} /></label>
         <label>要求程度<select aria-label="要求程度" value={level} onChange={(event) => setLevel(event.target.value as RequirementLevel)}>{levels.map((item) => <option key={item} value={item}>{requirementLabel(item)}</option>)}</select></label>
         <label>系统如何找证据<textarea aria-label="系统如何找证据" value={guidance} onChange={(event) => setGuidance(event.target.value)} /></label>
+        <label>符合时常见表述<input aria-label="符合时常见表述" value={positiveKeywords} onChange={(event) => setPositiveKeywords(event.target.value)} placeholder="客户访谈，customer discovery" /></label>
+        <label>不符合时常见表述<input aria-label="不符合时常见表述" value={negativeKeywords} onChange={(event) => setNegativeKeywords(event.target.value)} placeholder="纯内部平台，no customer contact" /></label>
         <label>相关主题（可选）<input aria-label="相关主题" value={relatedTopics} onChange={(event) => setRelatedTopics(event.target.value)} /></label>
         <button className="primary-button" type="button" disabled={!complete} onClick={submitManual}>暂存并检查冲突</button>
       </div>}
     </div>
   </div>;
+}
+
+function splitTerms(value: string): string[] {
+  return value.split(/[,\uff0c]/).map((item) => item.trim()).filter(Boolean);
 }

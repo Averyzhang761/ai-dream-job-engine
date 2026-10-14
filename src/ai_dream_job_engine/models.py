@@ -213,6 +213,7 @@ class ValueDimension(DomainModel):
     fact_ids: list[str] = Field(default_factory=list)
     signal_ids: list[str] = Field(default_factory=list)
     weight: float = Field(ge=0)
+    legacy_weight_override: float | None = Field(default=None, ge=0)
     scoring_direction: ScoringDirection
     positive_keywords: list[str] = Field(default_factory=list)
     negative_keywords: list[str] = Field(default_factory=list)
@@ -254,7 +255,11 @@ class ValueDimension(DomainModel):
             RequirementLevel.STRONG: (1.5, False),
             RequirementLevel.REQUIRED: (1.0, True),
         }[level]
-        if "weight" in payload and payload["weight"] != projection[0]:
+        if (
+            "weight" in payload
+            and payload["weight"] != projection[0]
+            and payload.get("legacy_weight_override") != payload["weight"]
+        ):
             raise ValueError("weight must match requirement_level")
         if (
             "hard_constraint" in payload
@@ -270,6 +275,19 @@ class DecisionQuestion(DomainModel):
     id: str = Field(min_length=1)
     version: str = Field(min_length=1)
     question: str = Field(min_length=1)
+    evaluation: Literal["provider", "local_keywords"] = "provider"
+    positive_keywords: list[str] = Field(default_factory=list)
+    negative_keywords: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def local_questions_have_explicit_keywords(self) -> DecisionQuestion:
+        if (
+            self.evaluation == "local_keywords"
+            and not self.positive_keywords
+            and not self.negative_keywords
+        ):
+            raise ValueError("local keyword questions require explicit keywords")
+        return self
 
 
 class PreferenceConflictKind(StrEnum):
@@ -288,6 +306,8 @@ class CustomPreferenceProposal(DomainModel):
     desired_value: str | None = None
     requirement_level: RequirementLevel | None = None
     evidence_guidance: str | None = None
+    positive_keywords: list[str] = Field(default_factory=list)
+    negative_keywords: list[str] = Field(default_factory=list)
     fact_ids: list[str] = Field(default_factory=list)
     signal_ids: list[str] = Field(default_factory=list)
     related_topic_ids: list[str] = Field(default_factory=list)
@@ -307,6 +327,7 @@ class PreferenceResolution(DomainModel):
         "accept_tension",
     ]
     edited_proposal: CustomPreferenceProposal | None = None
+    expected_storage_revision: int | None = Field(default=None, ge=0)
 
 
 class Rubric(DomainModel):
@@ -465,6 +486,7 @@ class OutboundDisclosure(DomainModel):
 
 
 class RubricPatch(DomainModel):
+    expected_storage_revision: int | None = Field(default=None, ge=0)
     fact_updates: dict[str, dict[str, Any]] = Field(default_factory=dict)
     dimension_updates: dict[str, dict[str, Any]] = Field(default_factory=dict)
     question_updates: dict[str, dict[str, Any]] = Field(default_factory=dict)

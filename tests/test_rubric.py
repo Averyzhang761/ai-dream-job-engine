@@ -46,6 +46,28 @@ def test_default_rubric_contains_ai_job_dimensions() -> None:
     assert all(dimension.desired_value for dimension in rubric.dimensions)
 
 
+def test_default_rubric_preserves_legacy_effective_weights() -> None:
+    rubric = load_default_rubric()
+    expected = {
+        "role_family_fit": 1.0,
+        "applied_ai_depth": 1.5,
+        "product_customer_proximity": 1.0,
+        "ownership_impact": 1.0,
+        "infrastructure_balance": 0.75,
+        "work_arrangement": 0.75,
+        "compensation": 0.75,
+        "work_authorization": 1.0,
+    }
+
+    effective = {
+        item.id: item.legacy_weight_override
+        if item.legacy_weight_override is not None
+        else item.weight
+        for item in rubric.dimensions
+    }
+    assert effective == expected
+
+
 def test_requirement_levels_have_one_internal_projection() -> None:
     assert requirement_weight("ignored") == 0
     assert requirement_weight("normal") == 1
@@ -203,6 +225,16 @@ def test_patch_rejects_duplicate_ids_in_input_rubric() -> None:
     rubric.dimensions.append(rubric.dimensions[0].model_copy(deep=True))
 
     with pytest.raises(ValueError, match="duplicate dimension id"):
+        apply_rubric_patch(rubric, RubricPatch())
+
+
+def test_patch_rejects_duplicate_normalized_topics() -> None:
+    rubric = load_default_rubric()
+    rubric.dimensions[1] = rubric.dimensions[1].model_copy(
+        update={"topic_id": "  ROLE_FAMILY_FIT  "}
+    )
+
+    with pytest.raises(ValueError, match="topic_id values must be unique"):
         apply_rubric_patch(rubric, RubricPatch())
 
 
@@ -430,17 +462,17 @@ def test_skip_threshold_must_cover_zero() -> None:
         )
 
 
-def test_hard_constraint_requires_active_candidate_comparison() -> None:
+def test_hard_constraint_requires_a_judgment_input() -> None:
     rubric = load_default_rubric()
 
-    with pytest.raises(ValueError, match="hard_constraint.*candidate_comparison"):
+    with pytest.raises(ValueError, match="hard_constraint.*reference an input"):
         apply_rubric_patch(
             rubric,
             RubricPatch(
-                fact_updates={
-                    "work_authorization_requirement": {
-                        "candidate_comparison": "none",
-                        "qualification_weight": 0,
+                dimension_updates={
+                    "work_authorization": {
+                        "fact_ids": [],
+                        "signal_ids": [],
                     }
                 }
             ),

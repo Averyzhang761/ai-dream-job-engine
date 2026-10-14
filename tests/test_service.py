@@ -216,6 +216,49 @@ def test_analyze_job_runs_extract_signals_decide_and_persist(tmp_path) -> None:
     assert service.list_analyzed_jobs()[0].job_title == "Senior Python Engineer"
 
 
+def test_custom_preference_keywords_are_evaluated_locally(tmp_path) -> None:
+    rubric = _rubric()
+    local_question = DecisionQuestion(
+        id="custom:remote:fit",
+        version="local-v1",
+        question="Private preference text",
+        evaluation="local_keywords",
+        positive_keywords=["remote role"],
+        negative_keywords=["onsite only"],
+    )
+    local_dimension = ValueDimension(
+        id="custom:remote",
+        name="Remote preference",
+        definition="Prefer remote work",
+        signal_ids=[local_question.id],
+        weight=1,
+        scoring_direction=ScoringDirection.HIGHER_IS_BETTER,
+    )
+    rubric = rubric.model_copy(
+        update={
+            "dimensions": [*rubric.dimensions, local_dimension],
+            "questions": [*rubric.questions, local_question],
+        }
+    )
+    service, _, _, signal_provider = _service(
+        tmp_path,
+        profile=CandidateProfile(),
+        rubric=rubric,
+    )
+
+    record = service.analyze_job(JOB_DESCRIPTION)
+
+    assert signal_provider.calls == [(JOB_DESCRIPTION, ["role_fit"])]
+    custom_signal = next(
+        item for item in record.signals if item.question_id == local_question.id
+    )
+    assert custom_signal.probability == 1
+    assert custom_signal.provider == "local-keyword"
+    assert record.trace is not None
+    assert record.trace.providers["local_signals"] == "local-keyword"
+    assert record.trace.providers["signals"] == "fake-signals"
+
+
 def test_list_analyzed_jobs_excludes_trace_integrity_invalid_success(tmp_path) -> None:
     service, store, _, _ = _service(
         tmp_path,
@@ -597,44 +640,34 @@ def test_recompute_uses_current_rubric_missing_and_stale_semantics(tmp_path) -> 
     )
     store.save_rubric(current)
 
-    recomputed = service.recompute_decision(original.id)
+    with pytest.raises(
+        AnalysisServiceError,
+        match="New criteria require analyzing the job description again",
+    ) as captured:
+        service.recompute_decision(original.id)
 
-    assert recomputed.status == "success"
-    assert recomputed.signals == original.signals
-    assert recomputed.result is not None
-    assert recomputed.result.needs_review is True
-    assert {gap.subject_id for gap in recomputed.result.gaps} == {
-        "new_fact",
-        "role_fit",
-        "new_signal",
-    }
-    assert recomputed.trace is not None
-    assert {
-        item
-        for item in recomputed.trace.input_ids
-        if not item.startswith("profile-ref:v1:")
-    } == {"new_fact", "role_fit", "new_signal"}
-    assert recomputed.trace.question_versions == {
-        "role_fit": "question-v2",
-        "new_signal": "question-v1",
-    }
-    assert recomputed.decision_surface is not None
-    assert recomputed.decision_surface.fact_ids == ["new_fact"]
-    assert recomputed.decision_surface.question_versions == {
-        "role_fit": "question-v2",
-        "new_signal": "question-v1",
-    }
-    assert recomputed.trace.input_ids == sorted(
-        {
-            *recomputed.decision_surface.fact_ids,
-            *recomputed.decision_surface.question_versions,
-            *recomputed.decision_surface.profile_refs,
-        }
-    )
-    assert original.facts[0].evidence[0] not in recomputed.trace.evidence
-    assert original.signals[0].evidence[0] in recomputed.trace.evidence
+    assert captured.value.code == "fresh_job_description_required"
     assert len(extractor.calls) == 1
     assert len(signal_provider.calls) == 1
+
+
+def test_recompute_requires_fresh_jd_when_question_version_changes(tmp_path) -> None:
+    service, store, _, _ = _service(
+        tmp_path,
+        profile=CandidateProfile(),
+        rubric=_rubric(),
+    )
+    original = service.analyze_job(JOB_DESCRIPTION)
+    current = _rubric(version="rubric-v2")
+    current.questions[0] = current.questions[0].model_copy(
+        update={"version": "question-v2"}
+    )
+    store.save_rubric(current)
+
+    with pytest.raises(AnalysisServiceError) as captured:
+        service.recompute_decision(original.id)
+
+    assert captured.value.code == "fresh_job_description_required"
 
 
 def test_recompute_rejects_stored_input_trace_integrity_mismatch(tmp_path) -> None:

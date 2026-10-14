@@ -534,7 +534,7 @@ def test_two_profile_applications_merge_distinct_confirmations(tmp_path) -> None
     assert loaded.storage_revision == 2
 
 
-def test_two_rubric_applications_merge_distinct_patches(tmp_path) -> None:
+def test_two_rubric_applications_reject_stale_distinct_patches(tmp_path) -> None:
     path = tmp_path / "shared.sqlite3"
     barrier = threading.Barrier(2)
     first_store = BarrierRubricStore(path, barrier)
@@ -550,24 +550,27 @@ def test_two_rubric_applications_merge_distinct_patches(tmp_path) -> None:
     with ThreadPoolExecutor(max_workers=2) as pool:
         first_future = pool.submit(
             first.update_rubric,
-            RubricPatch(fact_updates={fact_id: {"name": "Updated fact"}}),
+            RubricPatch(expected_storage_revision=0, fact_updates={fact_id: {"name": "Updated fact"}}),
         )
         second_future = pool.submit(
             second.update_rubric,
             RubricPatch(
+                expected_storage_revision=0,
                 dimension_updates={dimension_id: {"definition": "Updated dimension"}}
             ),
         )
-        first_future.result(timeout=5)
-        second_future.result(timeout=5)
+        outcomes = []
+        for future in (first_future, second_future):
+            try:
+                outcomes.append(future.result(timeout=5))
+            except ApplicationError as error:
+                outcomes.append(error)
 
     loaded = first_store.load_rubric()
     assert loaded is not None
-    assert next(item for item in loaded.facts if item.id == fact_id).name == "Updated fact"
-    assert next(
-        item for item in loaded.dimensions if item.id == dimension_id
-    ).definition == "Updated dimension"
-    assert loaded.storage_revision == 2
+    assert sum(isinstance(item, Rubric) for item in outcomes) == 1
+    assert sum(isinstance(item, ApplicationError) for item in outcomes) == 1
+    assert loaded.storage_revision == 1
 
 
 def test_two_rubric_applications_reject_overlapping_concurrent_patches(
@@ -590,7 +593,7 @@ def test_two_rubric_applications_reject_overlapping_concurrent_patches(
         futures = [
             pool.submit(
                 application.update_rubric,
-                RubricPatch(fact_updates={fact_id: {"name": name}}),
+                RubricPatch(expected_storage_revision=0, fact_updates={fact_id: {"name": name}}),
             )
             for application, name in zip(applications, ("First", "Second"), strict=True)
         ]
@@ -626,6 +629,7 @@ def test_two_rubric_applications_cannot_resolve_the_same_preference_twice(
             desired_value="Direct customer discovery",
             requirement_level="strong",
             evidence_guidance="Look for customer interviews",
+            positive_keywords=["customer interviews"],
             fact_ids=["product_customer_scope"],
         )
     )
@@ -634,7 +638,10 @@ def test_two_rubric_applications_cannot_resolve_the_same_preference_twice(
     barrier = threading.Barrier(2)
     first = LocalRubricApplication(BarrierRubricStore(path, barrier))
     second = LocalRubricApplication(BarrierRubricStore(path, barrier))
-    resolution = PreferenceResolution(action="accept_new")
+    resolution = PreferenceResolution(
+        action="accept_new",
+        expected_storage_revision=staged.storage_revision,
+    )
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [
@@ -651,7 +658,7 @@ def test_two_rubric_applications_cannot_resolve_the_same_preference_twice(
     assert sum(isinstance(item, Rubric) for item in outcomes) == 1
     errors = [item for item in outcomes if isinstance(item, ApplicationError)]
     assert len(errors) == 1
-    assert errors[0].code == "invalid_custom_preference"
+    assert errors[0].code == "rubric_update_conflict"
     loaded = setup_store.load_rubric()
     assert loaded is not None
     assert len(
@@ -667,11 +674,66 @@ def test_invalid_preference_error_does_not_echo_private_text() -> None:
     with pytest.raises(ApplicationError) as captured:
         application.resolve_custom_preference(
             private_text,
-            PreferenceResolution(action="accept_new"),
+            PreferenceResolution(action="accept_new", expected_storage_revision=0),
         )
 
     assert captured.value.code == "invalid_custom_preference"
     assert private_text not in str(captured.value)
+
+
+def test_rubric_update_rejects_stale_expected_storage_revision() -> None:
+    store = MemoryStore(rubric=load_default_rubric())
+    application = LocalRubricApplication(store)
+    application.update_rubric(
+        RubricPatch(
+            expected_storage_revision=0,
+            fact_updates={"role_family": {"name": "Updated role family"}},
+        )
+    )
+
+    with pytest.raises(ApplicationError) as captured:
+        application.update_rubric(
+            RubricPatch(
+                expected_storage_revision=0,
+                fact_updates={"ai_scope": {"name": "Stale AI scope"}},
+            )
+        )
+
+    assert captured.value.code == "rubric_update_conflict"
+
+
+def test_preference_resolution_rejects_stale_review_revision() -> None:
+    store = MemoryStore(rubric=load_default_rubric())
+    application = LocalRubricApplication(store)
+    staged = application.stage_custom_preference(
+        CustomPreferenceProposal(
+            statement="Prefer customer discovery",
+            topic_id="customer_discovery",
+            category="role_content",
+            name="Customer discovery",
+            desired_value="Direct customer discovery",
+            requirement_level="strong",
+            evidence_guidance="Look for customer interviews",
+            positive_keywords=["customer interviews"],
+        )
+    )
+    application.update_rubric(
+        RubricPatch(
+            expected_storage_revision=staged.storage_revision,
+            fact_updates={"role_family": {"name": "Changed after review"}},
+        )
+    )
+
+    with pytest.raises(ApplicationError) as captured:
+        application.resolve_custom_preference(
+            staged.pending_preferences[0].id,
+            PreferenceResolution(
+                action="accept_new",
+                expected_storage_revision=staged.storage_revision,
+            ),
+        )
+
+    assert captured.value.code == "rubric_update_conflict"
 
 
 def test_memory_confirmation_rejects_forged_and_stale_preview_ids() -> None:
@@ -784,9 +846,11 @@ def test_rubric_read_transform_save_operations_are_serialized() -> None:
     application = LocalRubricApplication(store)
     second_started = threading.Event()
     first_patch = RubricPatch(
+        expected_storage_revision=0,
         fact_updates={"role_family": {"name": "Role family updated"}}
     )
     second_patch = RubricPatch(
+        expected_storage_revision=1,
         fact_updates={"ai_scope": {"name": "AI scope updated"}}
     )
 
@@ -1021,7 +1085,7 @@ async def test_public_errors_are_fixed_and_do_not_leak_context(monkeypatch) -> N
     with pytest.raises(ToolError) as rubric:
         await rubric_server.call_tool(
             "update_rubric",
-            {"patch": {"threshold_updates": {"skip": 0.5}}},
+                {"patch": {"expected_storage_revision": 0, "threshold_updates": {"skip": 0.5}}},
         )
     _assert_safe_error(
         rubric.value,

@@ -603,12 +603,15 @@ def test_zero_weight_fact_without_qualification_policy_is_disabled() -> None:
     )
 
 
-def test_decision_rejects_hard_constraint_without_candidate_comparison() -> None:
+def test_hard_preference_can_use_a_non_candidate_comparison_fact() -> None:
     rubric = _rubric()
     rubric.facts[2] = _with_candidate_policy(rubric.facts[2], "none", 0)
 
-    with pytest.raises(ValueError, match="hard_constraint.*candidate_comparison"):
-        decide_job(_facts(), _signals(), CandidateProfile(claims=_strong_claims()), rubric)
+    result = decide_job(
+        _facts(), _signals(), CandidateProfile(claims=_strong_claims()), rubric
+    )
+
+    assert result.recommendation is not None
 
 
 def test_explicit_qualification_survives_zero_weight_dimension() -> None:

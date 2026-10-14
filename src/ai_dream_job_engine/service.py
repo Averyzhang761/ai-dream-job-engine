@@ -21,12 +21,14 @@ from ai_dream_job_engine.models import (
     AnalysisSummary,
     CandidateProfile,
     DataClass,
+    DecisionQuestion,
     DecisionResult,
     DecisionSignal,
     DecisionSurfaceManifest,
     DecisionTrace,
     ExtractedFact,
     Rubric,
+    SignalStatus,
 )
 from ai_dream_job_engine.providers.base import (
     DecisionSignalProvider,
@@ -309,12 +311,19 @@ class JobAnalysisService:
             if rubric.facts:
                 raw_facts = self._fact_extractor.extract(job_description, rubric)
                 facts = safety.project_facts(raw_facts)
-            signals = []
-            if rubric.questions:
-                raw_signals = self._signal_provider.judge(
-                    job_description, rubric.questions
+            provider_questions = [
+                item for item in rubric.questions if item.evaluation == "provider"
+            ]
+            local_signals = _local_keyword_signals(
+                job_description, rubric.questions
+            )
+            provider_signals = []
+            if provider_questions:
+                provider_signals = self._signal_provider.judge(
+                    job_description, provider_questions
                 )
-                signals = safety.project_signals(raw_signals)
+            raw_signals = [*local_signals, *provider_signals]
+            signals = safety.project_signals(raw_signals)
             metadata = self._metadata(facts, signals)
             result = _decision(
                 facts,
@@ -396,6 +405,18 @@ class JobAnalysisService:
                 "models": existing.trace.model_versions,
                 "prompts": existing.trace.prompt_versions,
             }
+            available_signals = {
+                (item.question_id, item.question_version)
+                for item in existing.signals
+            }
+            required_signals = {
+                (item.id, item.version) for item in rubric.questions
+            }
+            if required_signals - available_signals:
+                raise AnalysisServiceError(
+                    "fresh_job_description_required",
+                    "New criteria require analyzing the job description again.",
+                )
             failed = False
             try:
                 result = _decision(
@@ -514,19 +535,42 @@ class JobAnalysisService:
         signals: list[DecisionSignal],
     ) -> dict[str, dict[str, str]]:
         metadata = {"providers": {}, "models": {}, "prompts": {}}
-        for stage, provider, outputs, label in (
-            ("facts", self._fact_extractor, facts, "fact"),
-            ("signals", self._signal_provider, signals, "signal"),
+        local_signals = [
+            item for item in signals if item.provider == "local-keyword"
+        ]
+        provider_signals = [
+            item for item in signals if item.provider != "local-keyword"
+        ]
+        for stage, provider, outputs, label, prompt_version in (
+            ("facts", self._fact_extractor, facts, "fact", None),
+            ("signals", self._signal_provider, provider_signals, "signal", None),
+            (
+                "local_signals",
+                None,
+                local_signals,
+                "local signal",
+                "local-keyword-v1",
+            ),
         ):
             if not outputs:
                 continue
             metadata["providers"][stage] = _stage_metadata(
-                provider, outputs, "provider", f"{label} provider"
+                provider,
+                outputs,
+                "provider",
+                f"{label} provider",
+                include_direct=provider is not None,
             )
             metadata["models"][stage] = _stage_metadata(
-                provider, outputs, "model", f"{label} model"
+                provider,
+                outputs,
+                "model",
+                f"{label} model",
+                include_direct=provider is not None,
             )
-            metadata["prompts"][stage] = _prompt_version(provider)
+            metadata["prompts"][stage] = (
+                prompt_version or _prompt_version(provider)
+            )
         return metadata
 
     def _find_analysis(self, analysis_id: str) -> AnalysisRecord | None:
@@ -817,7 +861,16 @@ def _validate_stored_record(record: AnalysisRecord) -> None:
 
     expected_stages = {
         *({"facts"} if record.facts else set()),
-        *({"signals"} if record.signals else set()),
+        *(
+            {"signals"}
+            if any(item.provider != "local-keyword" for item in record.signals)
+            else set()
+        ),
+        *(
+            {"local_signals"}
+            if any(item.provider == "local-keyword" for item in record.signals)
+            else set()
+        ),
     }
     for versions in (
         trace.providers,
@@ -847,13 +900,23 @@ def _validate_stored_record(record: AnalysisRecord) -> None:
         != {trace.model_versions["facts"]}
     ):
         raise ValueError("stored fact metadata mismatch")
-    if record.signals and (
-        {item.provider for item in record.signals}
-        != {trace.providers["signals"]}
-        or {item.model for item in record.signals}
-        != {trace.model_versions["signals"]}
+    for stage, stage_signals in (
+        (
+            "signals",
+            [item for item in record.signals if item.provider != "local-keyword"],
+        ),
+        (
+            "local_signals",
+            [item for item in record.signals if item.provider == "local-keyword"],
+        ),
     ):
-        raise ValueError("stored signal metadata mismatch")
+        if stage_signals and (
+            {item.provider for item in stage_signals}
+            != {trace.providers[stage]}
+            or {item.model for item in stage_signals}
+            != {trace.model_versions[stage]}
+        ):
+            raise ValueError("stored signal metadata mismatch")
 
     job_refs = _record_job_refs(record)
     for ref, excerpt in record.evidence_catalog.items():
@@ -1036,6 +1099,8 @@ def _stage_metadata(
     outputs: list[Any],
     field: str,
     label: str,
+    *,
+    include_direct: bool = True,
 ) -> str:
     if not outputs:
         raise ValueError(f"{label} metadata missing")
@@ -1043,7 +1108,7 @@ def _stage_metadata(
     if None in values or "" in values:
         raise ValueError(f"{label} metadata missing")
     direct = getattr(provider, field, None)
-    if direct:
+    if include_direct and direct:
         values.add(direct)
     if len(values) != 1:
         raise ValueError(f"{label} metadata inconsistent")
@@ -1063,6 +1128,43 @@ def _prompt_version(provider: Any) -> str:
 
 def _latency_ms(started_at: float, finished_at: float) -> int:
     return max(0, round((finished_at - started_at) * 1000))
+
+
+def _local_keyword_signals(
+    job_description: str,
+    questions: list[DecisionQuestion],
+) -> list[DecisionSignal]:
+    text = job_description.casefold()
+    signals = []
+    for question in questions:
+        if question.evaluation != "local_keywords":
+            continue
+        positive = [
+            item for item in question.positive_keywords
+            if item.casefold() in text
+        ]
+        negative = [
+            item for item in question.negative_keywords
+            if item.casefold() in text
+        ]
+        decisive = bool(positive) != bool(negative)
+        signals.append(
+            DecisionSignal(
+                question_id=question.id,
+                question_version=question.version,
+                probability=float(bool(positive)) if decisive else None,
+                status=(
+                    SignalStatus.AVAILABLE if decisive else SignalStatus.INVALID
+                ),
+                provider="local-keyword",
+                model="deterministic-v1",
+                evidence=[
+                    *(f"matched-positive:{item}" for item in positive),
+                    *(f"matched-negative:{item}" for item in negative),
+                ],
+            )
+        )
+    return signals
 
 
 def _text_fact(facts: list[ExtractedFact], *fact_ids: str) -> str | None:

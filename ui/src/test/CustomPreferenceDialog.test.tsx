@@ -12,6 +12,7 @@ const pending = (conflict_kind: PendingPreference["conflict_kind"]): PendingPref
   id: "draft-1", statement: "我想直接接触客户", topic_id: "customer_contact",
   category: "role_content", name: "客户接触", desired_value: "直接与客户共创",
   requirement_level: "strong", evidence_guidance: "查看客户访谈与共创证据",
+  positive_keywords: ["客户访谈"], negative_keywords: ["纯内部平台"],
   fact_ids: ["product_customer_scope"], signal_ids: [], related_topic_ids: [],
   conflict_kind, conflicting_dimension_id: conflict_kind === "none" ? null : "product_customer_proximity",
 });
@@ -67,6 +68,12 @@ describe("PendingPreferenceReview", () => {
     expect(screen.getByRole("button", { name: "确认添加" })).toBeDisabled();
     await user.type(screen.getByLabelText("偏好名称"), "客户接触");
     await user.type(screen.getByLabelText("我的选择"), "直接共创");
+    expect(screen.getByRole("button", { name: "确认添加" })).toBeEnabled();
+  });
+
+  it("allows a complete preference without exposing fact or signal IDs", () => {
+    const withoutInputs = { ...pending("manual_review"), fact_ids: [], signal_ids: [] };
+    render(<PendingPreferenceReview preference={withoutInputs} busy={false} onResolve={vi.fn()} />);
     expect(screen.getByRole("button", { name: "确认添加" })).toBeEnabled();
   });
 });

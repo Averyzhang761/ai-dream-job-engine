@@ -130,7 +130,11 @@ by the host Agent. The Agent may structure the supplied statement only after an
 explicit user action. The local app then shows an editable preview and requires
 the user to resolve duplicates, direct conflicts, or semantic tension before
 the rule affects scoring. An Agent handoff failure preserves the original text
-and exposes the same manual confirmation fields.
+and exposes the same manual confirmation fields. Confirmed positive and negative
+JD phrases are matched locally; private preference text is not added to external
+model requests. When a new preference introduces a judgment signal that an old
+analysis does not contain, the original JD must be analyzed again rather than
+reporting a misleading recomputation success.
 
 ## One-JD quickstart
 

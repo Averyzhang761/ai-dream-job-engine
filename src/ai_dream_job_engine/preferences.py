@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 from uuid import uuid4
 
 from ai_dream_job_engine.models import (
     CriterionOrigin,
     CustomPreferenceProposal,
+    DecisionQuestion,
     PendingPreference,
     PreferenceConflictKind,
     PreferenceResolution,
@@ -89,9 +91,20 @@ def resolve_preference(
         ]
     else:
         dimensions = [*rubric.dimensions, dimension]
+    question = _question_from_proposal(proposal)
+    referenced_signals = {
+        signal_id for item in dimensions for signal_id in item.signal_ids
+    }
+    questions = [
+        item
+        for item in rubric.questions
+        if item.id != question.id and item.id in referenced_signals
+    ]
+    questions.append(question)
     return _replace(
         rubric,
         dimensions=dimensions,
+        questions=questions,
         pending_preferences=pending,
     )
 
@@ -108,6 +121,8 @@ def _classify(
         proposal.evidence_guidance,
     )
     if any(item is None or (isinstance(item, str) and not item.strip()) for item in required):
+        return PreferenceConflictKind.MANUAL_REVIEW, None
+    if not proposal.positive_keywords and not proposal.negative_keywords:
         return PreferenceConflictKind.MANUAL_REVIEW, None
 
     topic = _normalized(proposal.topic_id)
@@ -136,8 +151,6 @@ def _classify(
         if related is not None:
             return PreferenceConflictKind.SEMANTIC_TENSION, related.id
 
-    if not proposal.fact_ids and not proposal.signal_ids:
-        return PreferenceConflictKind.MANUAL_REVIEW, None
     return PreferenceConflictKind.NONE, None
 
 
@@ -155,8 +168,7 @@ def _dimension_from_proposal(
     ):
         raise ValueError("manual_review proposal is incomplete")
 
-    if existing is None and not proposal.fact_ids and not proposal.signal_ids:
-        raise ValueError("manual_review proposal has no judgment inputs")
+    signal_id = _custom_signal_id(proposal.topic_id)
     payload = existing.model_dump(mode="python") if existing is not None else {
         "id": f"custom:{proposal.topic_id}",
         "examples": [],
@@ -173,13 +185,37 @@ def _dimension_from_proposal(
         desired_value=proposal.desired_value,
         requirement_level=proposal.requirement_level,
         origin=CriterionOrigin.CUSTOM,
-        fact_ids=proposal.fact_ids or payload.get("fact_ids", []),
-        signal_ids=proposal.signal_ids or payload.get("signal_ids", []),
+        fact_ids=[],
+        signal_ids=[signal_id],
         weight=requirement_weight(proposal.requirement_level),
+        legacy_weight_override=None,
         hard_constraint=requirement_is_hard(proposal.requirement_level),
         explanation_template=proposal.evidence_guidance,
     )
     return ValueDimension.model_validate(payload)
+
+
+def _question_from_proposal(proposal: CustomPreferenceProposal) -> DecisionQuestion:
+    if proposal.topic_id is None or proposal.desired_value is None:
+        raise ValueError("manual_review proposal is incomplete")
+    question = (
+        f"Does this role satisfy the preference '{proposal.desired_value}'? "
+        f"Use this evidence guidance: {proposal.evidence_guidance}."
+    )
+    version = hashlib.sha256(question.encode()).hexdigest()[:16]
+    return DecisionQuestion(
+        id=_custom_signal_id(proposal.topic_id),
+        version=f"sha256:{version}",
+        question=question,
+        evaluation="local_keywords",
+        positive_keywords=proposal.positive_keywords,
+        negative_keywords=proposal.negative_keywords,
+    )
+
+
+def _custom_signal_id(topic_id: str) -> str:
+    topic_hash = hashlib.sha256(_normalized(topic_id).encode()).hexdigest()[:16]
+    return f"custom:{topic_hash}:fit"
 
 
 def _replace(rubric: Rubric, **updates: object) -> Rubric:

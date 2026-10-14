@@ -108,6 +108,7 @@ export interface ValueDimension {
   fact_ids: string[];
   signal_ids: string[];
   weight: number;
+  legacy_weight_override?: number | null;
   scoring_direction: "higher_is_better" | "lower_is_better";
   positive_keywords: string[];
   negative_keywords: string[];
@@ -132,6 +133,8 @@ export interface PendingPreference {
   desired_value: string | null;
   requirement_level: RequirementLevel | null;
   evidence_guidance: string | null;
+  positive_keywords: string[];
+  negative_keywords: string[];
   fact_ids: string[];
   signal_ids: string[];
   related_topic_ids: string[];
@@ -147,6 +150,7 @@ export type CustomPreferenceProposal = Omit<
 export interface PreferenceResolution {
   action: "accept_new" | "replace_existing" | "keep_existing" | "accept_tension";
   edited_proposal?: CustomPreferenceProposal;
+  expected_storage_revision?: number;
 }
 
 export interface DecisionQuestion {
@@ -159,6 +163,7 @@ export interface Rubric {
   id: string;
   version: string;
   revision: string;
+  storage_revision?: number;
   facts: FactDefinition[];
   dimensions: ValueDimension[];
   questions: DecisionQuestion[];
@@ -167,6 +172,7 @@ export interface Rubric {
 }
 
 export interface RubricPatch {
+  expected_storage_revision?: number;
   fact_updates?: Record<string, Partial<FactDefinition>>;
   dimension_updates?: Record<string, Partial<ValueDimension>>;
   threshold_updates?: Partial<Record<RecommendationLevel, number>>;

@@ -60,8 +60,9 @@ def decide_job(
 ) -> DecisionResult:
     """Return a deterministic recommendation from validated local inputs."""
     inputs = _normalize(facts, signals, profile, rubric)
-    preference, preference_gaps = _preference(inputs, rubric)
+    preference, preference_gaps, preference_blockers = _preference(inputs, rubric)
     qualification, qualification_gaps, blockers = _qualification(inputs, rubric)
+    blockers = [*preference_blockers, *blockers]
     preference_score = _weighted(preference)
     qualification_score = _weighted(qualification)
 
@@ -241,9 +242,12 @@ def _unknown(value: Any) -> bool:
     )
 
 
-def _preference(inputs: _Inputs, rubric: Rubric) -> tuple[list[DecisionContribution], list[Gap]]:
+def _preference(
+    inputs: _Inputs, rubric: Rubric
+) -> tuple[list[DecisionContribution], list[Gap], list[Gap]]:
     contributions: list[DecisionContribution] = []
     gaps: list[Gap] = []
+    blockers: list[Gap] = []
     for dimension in sorted(rubric.dimensions, key=lambda item: item.id):
         if dimension.weight == 0:
             continue
@@ -263,17 +267,30 @@ def _preference(inputs: _Inputs, rubric: Rubric) -> tuple[list[DecisionContribut
         score = sum(score for score in scores if score is not None) / len(scores)
         if dimension.threshold is not None:
             score = float(score >= dimension.threshold)  # Equality passes.
-        contributions.append(
-            DecisionContribution(
-                subject_id=dimension.id,
-                score=score,
-                weight=dimension.weight,
-                input_ids=sorted(value.id for value in values),
-                job_evidence=_evidence(values),
-                audit_support=_audit_support(values),
-            )
+        contribution = DecisionContribution(
+            subject_id=dimension.id,
+            score=score,
+            weight=(
+                dimension.legacy_weight_override
+                if dimension.legacy_weight_override is not None
+                else dimension.weight
+            ),
+            input_ids=sorted(value.id for value in values),
+            job_evidence=_evidence(values),
+            audit_support=_audit_support(values),
         )
-    return contributions, _sort_gaps(gaps)
+        contributions.append(contribution)
+        if dimension.hard_constraint and score < 1:
+            blockers.append(
+                Gap(
+                    kind=GapKind.HARD_BLOCKER,
+                    subject_id=dimension.id,
+                    message=f"Required preference is not satisfied: {dimension.name}.",
+                    input_ids=contribution.input_ids,
+                    job_evidence=contribution.job_evidence,
+                )
+            )
+    return contributions, _sort_gaps(gaps), _sort_gaps(blockers)
 
 
 def _dimension_score(value: Any, dimension: ValueDimension) -> float | None:

@@ -55,9 +55,15 @@ def apply_rubric_patch(rubric: Rubric, patch: RubricPatch) -> Rubric:
         _normalize_fact_default(fact)
         for fact in _apply_updates(rubric.facts, patch.fact_updates, FactDefinition)
     ]
-    dimensions = _apply_updates(
-        rubric.dimensions, patch.dimension_updates, ValueDimension
-    )
+    dimension_updates = {
+        item_id: (
+            {**changes, "legacy_weight_override": None}
+            if "requirement_level" in changes
+            else changes
+        )
+        for item_id, changes in patch.dimension_updates.items()
+    }
+    dimensions = _apply_updates(rubric.dimensions, dimension_updates, ValueDimension)
     questions = _apply_updates(
         rubric.questions, patch.question_updates, DecisionQuestion
     )
@@ -113,6 +119,12 @@ def _apply_updates(
 def _validate_rubric(rubric: Rubric) -> None:
     _require_unique_ids("fact", rubric.facts)
     _require_unique_ids("dimension", rubric.dimensions)
+    topics = [
+        " ".join(item.topic_id.casefold().split())
+        for item in rubric.dimensions
+    ]
+    if len(topics) != len(set(topics)):
+        raise ValueError("dimension topic_id values must be unique")
     _require_unique_ids("question", rubric.questions)
 
     facts_by_id = {fact.id: fact for fact in rubric.facts}
@@ -126,6 +138,13 @@ def _validate_rubric(rubric: Rubric) -> None:
     for dimension in rubric.dimensions:
         if not math.isfinite(dimension.weight):
             raise ValueError(f"dimension {dimension.id} weight must be finite")
+        if (
+            dimension.legacy_weight_override is not None
+            and not math.isfinite(dimension.legacy_weight_override)
+        ):
+            raise ValueError(
+                f"dimension {dimension.id} legacy_weight_override must be finite"
+            )
         _require_threshold(dimension.threshold, f"dimension {dimension.id}")
         for fact_id in dimension.fact_ids:
             if fact_id not in fact_ids:
@@ -137,13 +156,11 @@ def _validate_rubric(rubric: Rubric) -> None:
                 raise ValueError(
                     f"unknown signal reference {signal_id!r} in dimension {dimension.id!r}"
                 )
-        if dimension.hard_constraint and not any(
-            facts_by_id[fact_id].candidate_comparison != "none"
-            for fact_id in dimension.fact_ids
+        if dimension.hard_constraint and not (
+            dimension.fact_ids or dimension.signal_ids
         ):
             raise ValueError(
-                f"hard_constraint dimension {dimension.id!r} must reference a fact "
-                "with active candidate_comparison"
+                f"hard_constraint dimension {dimension.id!r} must reference an input"
             )
 
     expected_levels = set(RecommendationLevel)

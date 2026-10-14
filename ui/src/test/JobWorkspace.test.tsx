@@ -19,6 +19,7 @@ const editableRubric: Rubric = {
   id: "default",
   version: "1",
   revision: "r1",
+  storage_revision: 0,
   facts: [{
     id: "location",
     name: "地点",

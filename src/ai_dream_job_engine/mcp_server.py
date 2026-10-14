@@ -634,9 +634,16 @@ class LocalRubricApplication:
 
     def update_rubric(self, patch: RubricPatch) -> Rubric:
         with self._lock:
+            if patch.expected_storage_revision is None:
+                raise ApplicationError(RUBRIC_UPDATE_CONFLICT)
             base: Rubric | None = None
             while True:
                 current = self._get_rubric()
+                if (
+                    patch.expected_storage_revision is not None
+                    and current.storage_revision != patch.expected_storage_revision
+                ):
+                    raise ApplicationError(RUBRIC_UPDATE_CONFLICT)
                 if base is None:
                     base = current
                 elif _rubric_patch_conflicts(base, current, patch):
@@ -675,17 +682,27 @@ class LocalRubricApplication:
         self, draft_id: str, resolution: PreferenceResolution
     ) -> Rubric:
         with self._lock:
+            if resolution.expected_storage_revision is None:
+                raise ApplicationError(RUBRIC_UPDATE_CONFLICT)
             return self._mutate_preference(
                 lambda rubric: resolve_preference(
                     rubric, draft_id, resolution
-                )
+                ),
+                expected_storage_revision=resolution.expected_storage_revision,
             )
 
     def _mutate_preference(
-        self, operation: Callable[[Rubric], Rubric]
+        self,
+        operation: Callable[[Rubric], Rubric],
+        expected_storage_revision: int | None = None,
     ) -> Rubric:
         while True:
             current = self._get_rubric()
+            if (
+                expected_storage_revision is not None
+                and current.storage_revision != expected_storage_revision
+            ):
+                raise ApplicationError(RUBRIC_UPDATE_CONFLICT)
             try:
                 updated = operation(current).model_copy(
                     update={"storage_revision": current.storage_revision + 1}

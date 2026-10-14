@@ -19,13 +19,13 @@ const dimension = (index: number): ValueDimension => ({
 });
 
 const rubric: Rubric = {
-  id: "default", version: "1", revision: "r1", facts: [],
+  id: "default", version: "1", revision: "r1", storage_revision: 0, facts: [],
   dimensions: Array.from({ length: 24 }, (_, index) => dimension(index + 1)), questions: [],
   pending_preferences: [],
   recommendation_thresholds: { priority_apply: 0.8, apply_after_review: 0.6, hold: 0.3, skip: 0 },
 };
 
-function bridge() {
+function bridge(initial = rubric) {
   const calls: Array<{ name: string; args: object }> = [];
   const value: McpAppBridge = {
     initialize: async () => undefined,
@@ -33,7 +33,7 @@ function bridge() {
     sendMessage: async () => undefined,
     callTool: async <T,>(name: string, args: object) => {
       calls.push({ name, args });
-      if (name === "get_rubric") return structuredClone(rubric) as T;
+      if (name === "get_rubric") return structuredClone(initial) as T;
       if (name === "update_rubric") return { ...rubric, revision: "r2" } as T;
       if (name === "recompute_decision") return { id: "analysis-1" } as T;
       throw new Error("unexpected tool");
@@ -80,18 +80,30 @@ describe("RubricView", () => {
     await user.click(screen.getByRole("button", { name: "保存更改" }));
     await waitFor(() => expect(mock.calls).toContainEqual({
       name: "update_rubric",
-      args: { patch: { dimension_updates: { standard_4: { requirement_level: "required", weight: 1, hard_constraint: true } } } },
+      args: { patch: { expected_storage_revision: 0, dimension_updates: { standard_4: { requirement_level: "required", weight: 1, hard_constraint: true } } } },
     }));
   });
 
   it("offers all-criteria search and filters without horizontal overflow", async () => {
     const user = userEvent.setup();
-    render(<RubricView bridge={bridge().value} selectedAnalysisId={null} onRecomputed={vi.fn()} />);
+    const withPending = structuredClone(rubric);
+    withPending.pending_preferences = [{
+      id: "draft-filter", statement: "希望和客户共创", topic_id: "customer_contact",
+      category: "role_content", name: "客户共创", desired_value: "直接与客户共创",
+      requirement_level: "strong", evidence_guidance: "查看客户共创证据", fact_ids: ["role"],
+      positive_keywords: ["客户共创"], negative_keywords: ["纯内部平台"],
+      signal_ids: [], related_topic_ids: [], conflict_kind: "none", conflicting_dimension_id: null,
+    }];
+    render(<RubricView bridge={bridge(withPending).value} selectedAnalysisId={null} onRecomputed={vi.fn()} />);
     await user.click(await screen.findByRole("button", { name: "查看全部 24 条标准" }));
     const workspace = screen.getByLabelText("全部筛选标准");
     expect(within(workspace).getByRole("searchbox", { name: "搜索标准" })).toBeVisible();
     expect(within(workspace).getByLabelText("按主题筛选")).toBeVisible();
     expect(within(workspace).getByLabelText("按要求程度筛选")).toBeVisible();
+    expect(within(workspace).getByLabelText("按处理状态筛选")).toBeVisible();
+    await user.selectOptions(within(workspace).getByLabelText("按处理状态筛选"), "pending");
+    expect(within(workspace).getByText("客户共创")).toBeVisible();
+    expect(within(workspace).getByRole("button", { name: "处理" })).toBeVisible();
     expect(workspace).toHaveClass("criteria-workspace");
     expect(workspace).not.toHaveStyle({ overflowX: "auto" });
   });
@@ -105,6 +117,7 @@ describe("RubricView", () => {
       id: "draft-1", statement: "希望和客户共创", topic_id: "customer_contact",
       category: "role_content", name: "客户共创", desired_value: "直接与客户共创",
       requirement_level: "strong", evidence_guidance: "查看客户共创证据", fact_ids: ["role"],
+      positive_keywords: ["客户共创"], negative_keywords: ["纯内部平台"],
       signal_ids: [], related_topic_ids: [], conflict_kind: "none", conflicting_dimension_id: null,
     }];
     const testBridge: McpAppBridge = {
